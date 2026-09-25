@@ -450,6 +450,23 @@ def render_one(session, slug, page, spec):
     for i, m in enumerate(marks, 1):
         m['k'] = i
 
+    # Номера раздаются по месту в тексте, а не по порядку в marks — поэтому
+    # в комментариях ссылаются на id: «то же, что [[ctr]]» → «то же, что №4»
+    by_id = {}
+    for m in marks:
+        if m.get('id'):
+            by_id.setdefault(m['id'], m['k'])
+    unknown = set()
+
+    def comment_html(text):
+        def ref(mm):
+            k = by_id.get(mm.group(1))
+            if k is None:
+                unknown.add(mm.group(1))
+                return mm.group(0)
+            return f'<a href="#m{k}">№{k}</a>'
+        return re.sub(r'\[\[([\w-]+)\]\]', ref, esc(text))
+
     # что к какому блоку относится
     inline = {}      # блок -> пометки-фрагменты
     whole = {}       # блок -> класс пометки на весь блок
@@ -497,7 +514,7 @@ def render_one(session, slug, page, spec):
             if m['scope'] in ('абзац', 'раздел') and m['act'] not in ('добавить',):
                 label += f' — {m["scope"]}'
             out.append(f'<div class="note {m["cls"]}" id="m{m["k"]}"><b class="k">{m["k"]}.</b> '
-                       f'<b>{label}.</b> {esc(m.get("comment", ""))}'
+                       f'<b>{label}.</b> {comment_html(m.get("comment", ""))}'
                        + (f'<span class="src">{esc(src)}</span>' if src else '') + '</div>')
         return ''.join(out)
 
@@ -548,9 +565,9 @@ def render_one(session, slug, page, spec):
     need = [m for m in marks if m['act'] in ('запросить', 'уточнить')]
     need_html = ''
     if need or spec.get('questions'):
-        items = ''.join(f'<li><a href="#m{m["k"]}">№{m["k"]}</a> — {esc(m.get("comment", ""))}</li>'
+        items = ''.join(f'<li><a href="#m{m["k"]}">№{m["k"]}</a> — {comment_html(m.get("comment", ""))}</li>'
                         for m in need)
-        items += ''.join(f'<li>{esc(q)}</li>' for q in spec.get('questions', []))
+        items += ''.join(f'<li>{comment_html(q)}</li>' for q in spec.get('questions', []))
         need_html = f'<section class="need"><h2>Что нужно от вас</h2><ol>{items}</ol></section>'
     lost_html = ''
     if lost:
@@ -562,6 +579,8 @@ def render_one(session, slug, page, spec):
         for m, why in lost:
             print(f'   ⚠ не привязано ({why}): «{m.get("quote", "")[:60]}»')
 
+    for u in sorted(unknown):
+        print(f'   ⚠ ссылка [[{u}]] ни на что не указывает — нет пометки с таким id')
     title = next((b['text'] for b in blocks if b['type'] == 'h1'), slug)
     src = spec.get('source', '')
     doc = f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
