@@ -1,0 +1,236 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Панель задач</title>
+<style>
+:root {
+  --bg: #f5f6f8; --card: #ffffff; --text: #1d2330; --muted: #6a7282; --line: #e3e6eb;
+  --blue: #2f6fed; --green: #1f9d55; --red: #d64545; --amber: #c98a12; --track: #eceff3;
+  --mono: ui-monospace, "Cascadia Mono", Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root { --bg: #14171c; --card: #1c2027; --text: #e6e9ee; --muted: #9aa3b2; --line: #2b313b;
+          --blue: #6b9bff; --green: #3ec27a; --red: #ff6b6b; --amber: #f0b23e; --track: #2a3039; }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
+main { max-width: 1080px; margin: 0 auto; padding: 20px 16px 48px; }
+header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+h1 { font-size: 22px; margin: 0; }
+.muted { color: var(--muted); }
+.small { font-size: 13px; }
+.strip { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; background: var(--card); border: 1px solid var(--line);
+         border-radius: 10px; padding: 10px 14px; margin-bottom: 18px; }
+.strip b { font-weight: 600; }
+.dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; margin-right: 6px; vertical-align: 1px; }
+h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); margin: 22px 0 10px; }
+.card { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+.top { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+.title { font-weight: 600; font-size: 16px; }
+.chip { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; color: #fff; }
+.chip.running { background: var(--blue); } .chip.done { background: var(--green); }
+.chip.error { background: var(--red); } .chip.stale, .chip.partial { background: var(--amber); }
+.args { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin: 4px 0 10px; word-break: break-all; }
+.bar { height: 10px; background: var(--track); border-radius: 6px; overflow: hidden; }
+.bar > i { display: block; height: 100%; background: var(--blue); border-radius: 6px; transition: width .6s ease; }
+.done .bar > i { background: var(--green); } .error .bar > i { background: var(--red); } .stale .bar > i, .partial .bar > i { background: var(--amber); }
+.running .bar > i { background-image: linear-gradient(90deg, rgba(255,255,255,.0), rgba(255,255,255,.35), rgba(255,255,255,0));
+                    background-size: 200px 100%; background-repeat: no-repeat; animation: shine 1.6s linear infinite; background-color: var(--blue); }
+@keyframes shine { from { background-position: -200px 0; } to { background-position: calc(100% + 200px) 0; } }
+.row { display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 6px 0 2px; font-size: 13.5px; }
+table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 13.5px; table-layout: fixed; }
+td { padding: 5px 6px; border-top: 1px solid var(--line); vertical-align: middle; }
+td.name { font-family: var(--mono); font-size: 12.5px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; width: 30%; }
+td.bar-cell { width: 40%; }
+td.num { width: 11%; }
+td.num:last-child { width: 4%; }
+@media (max-width: 640px) { td.name { width: 40%; } td.bar-cell { width: 30%; } td.num.muted { display: none; } }
+td.num { text-align: right; white-space: nowrap; font-variant-numeric: tabular-nums; }
+.outs { margin-top: 10px; font-size: 13.5px; }
+.outs a { color: var(--blue); text-decoration: none; margin-right: 14px; word-break: break-all; }
+.outs a:hover { text-decoration: underline; }
+.err { margin-top: 8px; color: var(--red); font-size: 13.5px; white-space: pre-wrap; }
+details { margin-top: 10px; }
+summary { cursor: pointer; color: var(--muted); font-size: 13px; }
+pre { font-family: var(--mono); font-size: 12px; background: var(--bg); border: 1px solid var(--line); border-radius: 8px;
+      padding: 8px 10px; margin: 6px 0 0; white-space: pre-wrap; word-break: break-word; max-height: 260px; overflow: auto; }
+.empty { background: var(--card); border: 1px dashed var(--line); border-radius: 12px; padding: 22px; color: var(--muted); }
+code { font-family: var(--mono); font-size: 12.5px; }
+.methods { background: var(--card); border: 1px solid var(--line); border-radius: 12px; padding: 12px 16px 14px; margin-bottom: 18px; }
+.mhead { display: flex; gap: 12px; align-items: baseline; flex-wrap: wrap; margin-bottom: 6px; }
+.mhead b { font-size: 16px; }
+.filters { display: flex; gap: 6px; flex-wrap: wrap; margin: 6px 0 4px; }
+.filters button { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--bg); color: var(--text);
+                  border-radius: 999px; padding: 2px 10px; cursor: pointer; }
+.filters button.on { background: var(--text); color: var(--card); border-color: var(--text); }
+.mgroup { display: flex; gap: 8px; align-items: flex-start; margin-top: 8px; }
+.mgroup .gname { width: 150px; flex: none; font-size: 12.5px; color: var(--muted); padding-top: 5px; }
+.pills { display: flex; gap: 6px; flex-wrap: wrap; }
+.pill { font: inherit; font-size: 13px; font-weight: 600; border-radius: 999px; padding: 4px 12px; cursor: pointer;
+        border: 2px solid transparent; color: #fff; background: var(--muted); }
+.pill.ok { background: var(--green); } .pill.part { background: var(--amber); } .pill.fail, .pill.timeout { background: var(--red); }
+.pill.need { background: #7b61c9; } .pill.skip, .pill.unknown { background: transparent; color: var(--muted); border-color: var(--line); }
+.pill.running { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+.pill.sel { outline: 3px solid var(--text); outline-offset: 1px; }
+@keyframes pulse { 50% { opacity: .55; } }
+.mdetail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13.5px; }
+.mdetail pre { display: inline-block; margin: 6px 8px 0 0; max-width: 100%; }
+.copy { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
+@media (max-width: 640px) { .mgroup { flex-direction: column; } .mgroup .gname { width: auto; padding-top: 0; } }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <h1>Панель задач</h1>
+    <span class="muted small" id="upd">загрузка…</span>
+  </header>
+  <div class="strip" id="ap" hidden></div>
+  <div id="methods"></div>
+  <div id="runs"></div>
+</main>
+<script>
+const openLogs = new Set();
+let mFilter = "all", mSel = null, lastState = null;
+const MST = {ok: "работает", part: "частично", fail: "не работает", timeout: "таймаут", need: "нужен доступ",
+             skip: "не проверяется", unknown: "не проверялся", running: "идёт проверка"};
+const MFILTERS = {all: "все", ok: "работают", bad: "не работают", other: "не проверены / нужен доступ"};
+
+function mPass(m) {
+  if (mFilter === "all") return true;
+  if (mFilter === "ok") return m.status === "ok";
+  if (mFilter === "bad") return ["fail", "timeout", "part"].includes(m.status);
+  return ["need", "skip", "unknown"].includes(m.status);
+}
+
+function renderMethods(regs) {
+  const box = document.getElementById("methods");
+  if (!regs || !regs.length) { box.innerHTML = ""; return; }
+  box.innerHTML = regs.map((r, ri) => {
+    const cnt = {};
+    r.methods.forEach(m => cnt[m.status] = (cnt[m.status] || 0) + 1);
+    const summary = ["ok", "part", "fail", "timeout", "need", "running", "unknown", "skip"].filter(k => cnt[k])
+      .map(k => `${MST[k]} ${cnt[k]}`).join(" · ");
+    const groups = {};
+    r.methods.forEach((m, mi) => { if (mPass(m)) (groups[m.group] = groups[m.group] || []).push([m, mi]); });
+    const rows = Object.entries(groups).map(([g, ms]) => `<div class="mgroup"><div class="gname">${esc(g)}</div><div class="pills">`
+      + ms.map(([m, mi]) => `<button class="pill ${m.status}${mSel === ri + ":" + mi ? " sel" : ""}" data-k="${ri}:${mi}"
+          title="${esc(MST[m.status] || m.status)}${m.seconds != null ? " · " + dur(m.seconds) : ""}${m.note ? " · " + esc(m.note) : ""}">${esc(m.name)}</button>`).join("")
+      + `</div></div>`).join("");
+    let detail = "";
+    if (mSel && mSel.startsWith(ri + ":")) {
+      const m = r.methods[+mSel.split(":")[1]];
+      if (m) detail = `<div class="mdetail"><b>${esc(m.group)} · ${esc(m.name)}</b> — ${esc(m.what || "")}<br>
+        Статус: <b>${esc(MST[m.status] || m.status)}</b>${m.checked ? ` · проверено ${day(m.checked)} ${hm(m.checked)}` : ""}${m.seconds != null ? ` · заняло ${dur(m.seconds)}` : ""}
+        ${m.note ? `<br>${esc(m.note)}` : ""}
+        ${m.example ? `<br><pre>${esc(m.example)}</pre><button class="copy" data-copy="${esc(m.example)}">копировать</button>` : ""}</div>`;
+    }
+    return `<div class="methods"><div class="mhead"><b>${esc(r.title || r.skill)}</b>
+        <span class="muted small">${summary}${r.updated ? ` · обновлено ${day(r.updated)} ${hm(r.updated)}` : ""}</span></div>
+      <div class="filters">${Object.entries(MFILTERS).map(([k, t]) => `<button data-f="${k}" class="${mFilter === k ? "on" : ""}">${t}</button>`).join("")}</div>
+      ${rows || `<div class="muted small" style="margin-top:8px">нет методов с таким статусом</div>`}${detail}</div>`;
+  }).join("");
+  box.querySelectorAll(".pill").forEach(b => b.onclick = () => { mSel = mSel === b.dataset.k ? null : b.dataset.k; renderMethods(lastState.methods); });
+  box.querySelectorAll(".filters button").forEach(b => b.onclick = () => { mFilter = b.dataset.f; renderMethods(lastState.methods); });
+  box.querySelectorAll(".copy").forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); b.textContent = "скопировано"; });
+}
+const STATUS = {running: "идёт", done: "готово", error: "ошибка", stale: "не отвечает", partial: "готово: не всё получено"};
+
+function dur(s) {
+  if (s == null) return "—";
+  s = Math.max(0, Math.round(s));
+  const h = Math.floor(s / 3600), m = Math.floor(s % 3600 / 60), sec = s % 60;
+  if (h) return `${h} ч ${m} мин`;
+  if (m) return `${m} мин ${sec} с`;
+  return `${sec} с`;
+}
+function hm(ts) { return ts ? ts.slice(11, 19) : "—"; }
+function day(ts) { return ts ? ts.slice(8, 10) + "." + ts.slice(5, 7) : ""; }
+function esc(s) { return String(s ?? "").replace(/[&<>"]/g, c => ({"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;"}[c])); }
+function num(n) { return (n ?? 0).toLocaleString("ru-RU"); }
+
+function renderAP(ap) {
+  const el = document.getElementById("ap");
+  if (!ap) { el.hidden = true; return; }
+  el.hidden = false;
+  const dot = `<span class="dot" style="background:var(${ap.alive ? "--green" : "--red"})"></span>`;
+  el.innerHTML = ap.alive
+    ? `<span>${dot}<b>A-Parser</b> ${esc(ap.version)}</span>
+       <span>потоков в работе: <b>${num(ap.threads)}</b></span>
+       <span>заданий в очереди: <b>${num(ap.queue)}</b></span>
+       <span>живых прокси: <b>${num(ap.proxies)}</b></span>
+       <span>капча: <b>${ap.captcha != null ? "$" + Number(ap.captcha).toFixed(2) : "—"}</b></span>`
+    : `<span>${dot}<b>A-Parser не отвечает</b></span><span class="muted">запуск: <code>python server.py start</code></span>`;
+}
+
+function card(r) {
+  // завершилась, но часть запросов без данных — жёлтым, чтобы не выглядело полным успехом
+  const st = (r.status === "done" && r.total && r.good < r.done) ? "partial" : r.status;
+  const stages = (r.stages || []).map(s => {
+    const pct = s.total ? Math.round(100 * Math.min(s.done, s.total) / s.total) : 0;
+    const mark = s.finished ? "✓" : (st === "running" ? "…" : "");
+    return `<tr><td class="name">${esc(s.name)}</td>
+      <td class="bar-cell"><div class="bar"><i style="width:${pct}%"></i></div></td>
+      <td class="num">${num(Math.min(s.done, s.total))} / ${num(s.total)}</td>
+      <td class="num muted">успешно ${num(s.ok)}</td><td class="num">${mark}</td></tr>`;
+  }).join("");
+  const outs = (r.outputs || []).map(o => `<a href="${o.href}" title="${esc(o.path)}">${esc(o.name)}</a>`).join("");
+  const log = (r.log || []).slice(-14).join("\n");
+  const open = openLogs.has(r.id) || (st === "running" && !openLogs.has("closed:" + r.id));
+  const timing = st === "running"
+    ? `прошло ${dur(r.elapsed)}${r.eta != null ? ` · осталось ≈ ${dur(r.eta)}` : ""}`
+    : `${st === "done" ? "заняло" : "шло"} ${dur(r.elapsed)}`;
+  return `<div class="card ${st}">
+    <div class="top"><span class="title">${esc(r.skill)} · ${esc(r.command)}</span>
+      <span class="chip ${st}">${STATUS[st] || esc(st)}</span>
+      <span class="muted small">${day(r.started)} ${hm(r.started)}</span></div>
+    <div class="args">${esc(r.args)}</div>
+    <div class="bar"><i style="width:${r.pct}%"></i></div>
+    <div class="row"><span>${r.total ? `${num(r.done)} из ${num(r.total)} запросов · успешно ${num(r.good)}` : "подготовка…"} · <b>${r.pct}%</b></span>
+      <span class="muted">${timing}</span></div>
+    ${stages ? `<table>${stages}</table>` : ""}
+    ${st === "stale" ? `<div class="err" style="color:var(--amber)">Процесс не присылал вестей дольше 30 с — скорее всего, остановлен.</div>` : ""}
+    ${r.error ? `<div class="err">${esc(r.error)}</div>` : ""}
+    ${outs ? `<div class="outs">Результат: ${outs}</div>` : ""}
+    ${log ? `<details data-id="${esc(r.id)}" ${open ? "open" : ""}><summary>лог</summary><pre>${esc(log)}</pre></details>` : ""}
+  </div>`;
+}
+
+function render(state) {
+  lastState = state;
+  renderMethods(state.methods);
+  document.getElementById("upd").textContent = `обновлено ${hm(state.now)} · каждые 2 с`;
+  renderAP(state.aparser);
+  const runs = state.runs || [];
+  const active = runs.filter(r => r.status === "running" || r.status === "stale");
+  const rest = runs.filter(r => !(r.status === "running" || r.status === "stale"));
+  const box = document.getElementById("runs");
+  if (!runs.length) {
+    box.innerHTML = `<div class="empty">Задач пока нет. Запустите команду скилла — например
+      <code>python run.py ahrefs -f domains.txt</code> в папке скилла — и она появится здесь.
+      <br><span class="small">Файлы запусков: ${esc(state.runs_dir)}</span></div>`;
+    return;
+  }
+  box.innerHTML = (active.length ? `<h2>Сейчас идут — ${active.length}</h2>` + active.map(card).join("") : "")
+                + (rest.length ? `<h2>Завершённые — ${rest.length}</h2>` + rest.map(card).join("") : "");
+  box.querySelectorAll("details").forEach(d => d.addEventListener("toggle", () => {
+    const id = d.dataset.id;
+    if (d.open) { openLogs.add(id); openLogs.delete("closed:" + id); } else { openLogs.delete(id); openLogs.add("closed:" + id); }
+  }));
+}
+
+async function tick() {
+  try {
+    const r = await fetch("/api/state", {cache: "no-store"});
+    render(await r.json());
+  } catch (e) {
+    document.getElementById("upd").textContent = "нет связи с панелью — запущен ли python panel.py?";
+  }
+}
+tick();
+setInterval(tick, 2000);
+</script>
+</body>
+</html>
