@@ -70,6 +70,12 @@ class Run:
             self.data["updated"] = _now()
             self._write()
 
+    def title(self, text: str):
+        """Заголовок карточки в панели вместо «скилл · команда» — например, что именно проверяли."""
+        with self.lock:
+            self.data["title"] = text
+            self._write()
+
     def output(self, path: str):
         with self.lock:
             self.data["outputs"].append(str(path))

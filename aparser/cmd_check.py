@@ -2,12 +2,14 @@
 
     python run.py check                    # все методы и заготовки, по 4 одновременно
     python run.py check --only serp,ahrefs # только методы, чьё имя начинается так
+    python run.py check --only domains:ahrefs,serp:google   # точно по id метода
     python run.py check --no-stubs --workers 3 --timeout 20
 
 Каждый метод запускается отдельной командой скилла (python run.py …) на одном-двух запросах.
 Итог — data\\methods\\aparser.json в папке скилла: у каждого метода статус
 (работает / частично / не работает / таймаут / нужен доступ), время, заметка и пример команды.
-Панель задач показывает его полосой кнопок наверху. Результаты проверок — в data\\_check\\.
+Панель задач показывает его полосой кнопок наверху и по кнопке запускает проверку отдельных методов
+(команда — поле check реестра). Результаты проверок — в data\\_check\\.
 """
 
 from __future__ import annotations
@@ -17,15 +19,20 @@ import os
 import re
 import subprocess
 import sys
-import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 
 import aparser as ap
 import progress as pg
 from cmd_stubs import STUBS
+
+if os.name == "nt":
+    import msvcrt
+else:
+    import fcntl
 
 SKILL_NAME = "aparser"
 METHODS_DIR = Path(os.getenv("TASK_PANEL_METHODS") or pg.RUNS.parent / "methods")
@@ -35,9 +42,9 @@ RU, EN = "пластиковые окна", "plastic windows"
 
 
 def _methods() -> list[dict]:
-    """(группа, имя кнопки, аргументы run.py, что делает)."""
+    """(группа, имя кнопки, аргументы run.py, что делает). id = «команда:имя» — по нему --only и панель."""
     m = []
-    add = lambda group, name, argv, what: m.append({"group": group, "name": name, "argv": argv, "what": what})
+    add = lambda group, name, argv, what: m.append({"id": f"{argv[0]}:{name}", "group": group, "name": name, "argv": argv, "what": what})
     for e in ("yandex", "google", "bing", "duckduckgo", "yahoo", "aol", "rambler", "seznam", "you"):
         add("Выдача", e, ["serp", "--engine", e, "-q", RU if e not in ("yahoo", "aol", "seznam", "you") else EN], f"выдача {e}")
     add("Выдача", "positions", ["positions", "--engine", "duckduckgo", "--site", "okna.ru,veka.ru", "-q", RU], "позиции сайтов (по выдаче)")
@@ -99,45 +106,121 @@ def _methods() -> list[dict]:
               "kp-ideas": RU, "kp-volume": RU, "wordcraft": RU, "trails-ip": "8.8.8.8", "google-images": RU}
     for name in STUBS:
         if name == "wb-product":
-            m.append({"group": "Заготовки", "name": name, "argv": None, "what": "карточка Wildberries",
+            m.append({"id": f"stub:{name}", "group": "Заготовки", "name": name, "argv": None, "what": "карточка Wildberries",
                       "skip": "не проверяется автоматически: нужен адрес реальной карточки"})
             continue
         add("Заготовки", name, ["stub", name, "-q", stub_q.get(name, EN)], STUBS[name]["parser"])
+    assert len({x["id"] for x in m}) == len(m), "повтор id метода"
     return m
 
 
-class Registry:
-    def __init__(self, methods: list[dict]):
-        self.lock = threading.Lock()
-        self.path = METHODS_DIR / f"{SKILL_NAME}.json"
-        old = {}
-        if self.path.exists():
+@contextmanager
+def _locked(path: Path):
+    """Замок между процессами: реестр могут писать сразу проверка из панели и проверка из терминала.
+    Замок держит ОС — если процесс упал, он снимается сам."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    f = open(path, "a+b")
+    try:
+        if os.name == "nt":
+            while True:
+                try:
+                    f.seek(0)
+                    msvcrt.locking(f.fileno(), msvcrt.LK_NBLCK, 1)
+                    break
+                except OSError:
+                    time.sleep(0.05)
+        else:
+            fcntl.flock(f.fileno(), fcntl.LOCK_EX)
+        yield
+    finally:
+        if os.name == "nt":
             try:
-                old = {(x["group"], x["name"]): x for x in json.loads(self.path.read_text(encoding="utf-8")).get("methods", [])}
-            except (OSError, ValueError, KeyError):
-                old = {}
-        self.data = {"skill": SKILL_NAME, "title": "aparser — методы A-Parser", "updated": None, "methods": []}
-        for x in methods:
-            prev = old.get((x["group"], x["name"]), {})
-            self.data["methods"].append({"group": x["group"], "name": x["name"], "what": x["what"],
-                                         "example": "python run.py " + " ".join(f'"{a}"' if " " in a else a for a in x["argv"]) if x["argv"] else "",
-                                         "status": prev.get("status", "unknown"), "checked": prev.get("checked"),
-                                         "seconds": prev.get("seconds"), "note": prev.get("note", "")})
-        METHODS_DIR.mkdir(parents=True, exist_ok=True)
-        self.write()
+                f.seek(0)
+                msvcrt.locking(f.fileno(), msvcrt.LK_UNLCK, 1)
+            except OSError:
+                pass
+        f.close()
 
-    def set(self, group, name, **kw):
-        with self.lock:
-            for x in self.data["methods"]:
-                if x["group"] == group and x["name"] == name:
-                    x.update(kw)
-            self.write()
 
-    def write(self):
-        self.data["updated"] = datetime.now().isoformat(timespec="seconds")
+def _run_alive(run_id: str | None) -> bool:
+    """Идёт ли ещё проверка, пометившая метод «идёт»: её файл запуска со свежим пульсом."""
+    if not run_id:
+        return False
+    try:
+        r = json.loads((pg.RUNS / f"{run_id}.json").read_text(encoding="utf-8"))
+        return r.get("status") == "running" and (datetime.now() - datetime.fromisoformat(r["heartbeat"])).total_seconds() < 30
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+
+
+class Registry:
+    """Реестр методов для панели. Каждая запись — под замком и с перечитыванием файла:
+    параллельные проверки меняют только свои строки и не затирают друг друга."""
+
+    def __init__(self, methods: list[dict], run_id: str | None = None):
+        self.path = METHODS_DIR / f"{SKILL_NAME}.json"
+        self.lock_path = self.path.with_suffix(".lock")
+        self.run_id = run_id
+        with _locked(self.lock_path):
+            old = {(x.get("group"), x.get("name")): x for x in self.read().get("methods", [])}
+            data = {"skill": SKILL_NAME, "title": "aparser — методы A-Parser", "updated": None,
+                    "about": "Какие парсеры A-Parser у скилла сейчас реально работают — итог последней проверки каждого "
+                             "метода на маленьком запросе. Перед задачей видно, на что можно рассчитывать; когда A-Parser "
+                             "обновился, кончились прокси или поисковик что-то поменял, — перепроверьте нужные методы "
+                             "кнопкой вместо полной проверки на час.",
+                    # чем панель запускает проверку по кнопке: {ids} — id методов через запятую
+                    "check": {"python": sys.executable, "cwd": str(Path(__file__).resolve().parent),
+                              "args": ["run.py", "check", "--only", "{ids}"]},
+                    "methods": []}
+            for x in methods:
+                prev = old.get((x["group"], x["name"]), {})
+                e = {"id": x["id"], "group": x["group"], "name": x["name"], "what": x["what"],
+                     "example": "python run.py " + " ".join(f'"{a}"' if " " in a else a for a in x["argv"]) if x["argv"] else "",
+                     "status": prev.get("status", "unknown"), "checked": prev.get("checked"),
+                     "seconds": prev.get("seconds"), "note": prev.get("note", "")}
+                if e["status"] == "running":
+                    if _run_alive(prev.get("run")):
+                        e.update({k: prev.get(k) for k in ("run", "prev_status", "prev_note")})
+                    else:                       # проверку прервали — вернуть прежний итог
+                        e.update(status=prev.get("prev_status") or "unknown", note=prev.get("prev_note") or "")
+                data["methods"].append(e)
+            self.write(data)
+
+    def read(self) -> dict:
+        try:
+            return json.loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return {}
+
+    def set(self, mid: str, **kw):
+        with _locked(self.lock_path):
+            data = self.read()
+            for x in data.get("methods", []):
+                if x.get("id") != mid:
+                    continue
+                if kw.get("status") == "running":   # запомнить прежний итог — на случай, если проверку прервут
+                    was = x.get("status")
+                    kw = {**kw, "run": self.run_id,
+                          "prev_status": x.get("prev_status") if was == "running" else was,
+                          "prev_note": x.get("prev_note") if was == "running" else x.get("note", "")}
+                else:
+                    for k in ("run", "prev_status", "prev_note"):
+                        x.pop(k, None)
+                x.update(kw)
+            self.write(data)
+
+    def write(self, data: dict):
+        data["updated"] = datetime.now().isoformat(timespec="seconds")
         tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self.data, ensure_ascii=False, indent=1), encoding="utf-8")
-        os.replace(tmp, self.path)
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        for i in range(40):                 # на Windows файл может быть открыт панелью на чтение
+            try:
+                os.replace(tmp, self.path)
+                return
+            except PermissionError:
+                if i == 39:
+                    raise
+                time.sleep(0.05)
 
 
 def judge(code: int | None, out: str, stub: bool) -> tuple[str, str]:
@@ -155,11 +238,12 @@ def judge(code: int | None, out: str, stub: bool) -> tuple[str, str]:
         if m:
             got, total = int(m.group(1)), int(m.group(2))
             return ("ok" if got == total else "part" if got else "fail"), f"с данными {got} из {total}"
-    bad = re.search(r"НЕ получено \((\d+)\)|: не получено (\d+)", out)
+    # итог «не получено»; строка повтора («не получено 2 — повтор 1/1 …») — не провал: повтор мог всё получить
+    bad = re.search(r"НЕ получено \((\d+)\)|: не получено (\d+)(?! — повтор)", out)
     if "→ " not in out:
         return "fail", "нет файла результата"
     if bad:
-        return "fail", "не получено — " + re.sub(r"\s+", " ", bad.group(0))
+        return "fail", f"не получено {bad.group(1) or bad.group(2)} из запросов проверки"
     return "ok", ""
 
 
@@ -168,18 +252,21 @@ def cmd_check(a):
     if a.only:
         pref = [x.strip() for x in a.only.split(",") if x.strip()]
         def hit(x, p):
-            if ":" in p:                      # «команда:метод» — точно, например domains:ahrefs
-                cmd, nm = p.split(":", 1)
-                return bool(x["argv"]) and x["argv"][0] == cmd and x["name"] == nm
+            if ":" in p:                      # id «команда:метод» — точно, например domains:ahrefs
+                return x["id"] == p
             return x["name"].startswith(p) or (bool(x["argv"]) and x["argv"][0].startswith(p))
         methods = [x for x in methods if any(hit(x, p) for p in pref)]
     if a.no_stubs:
         methods = [x for x in methods if x["group"] != "Заготовки"]
-    reg = Registry(_methods())
     run_ = pg.CURRENT
+    if run_:        # в панели — что проверяем: «rkn · check», «rkn, moz, dns +2 · check», «все методы · check»
+        names = [x["name"] for x in methods]
+        run_.title(("все методы" if not a.only else
+                    ", ".join(names[:3]) + (f" +{len(names) - 3}" if len(names) > 3 else "") or a.only) + " · check")
+    reg = Registry(_methods(), run_id=run_.id if run_ else None)
     stamp = f"{datetime.now():%Y-%m-%d_%H%M}"
     child_env = {**os.environ, "PYTHONIOENCODING": "utf-8",
-                 "APARSER_TOOLS_DATA": str(ap.DATA / "_check" / stamp),
+                 "APARSER_DATA": str(ap.DATA / "_check" / stamp),
                  "TASK_PANEL_RUNS": str(ap.DATA / "_check" / stamp / "_runs")}
     groups = {}
     for x in methods:
@@ -190,9 +277,9 @@ def cmd_check(a):
 
     def one(x):
         if not x["argv"]:
-            reg.set(x["group"], x["name"], status="skip", note=x.get("skip", ""), checked=datetime.now().isoformat(timespec="seconds"))
+            reg.set(x["id"], status="skip", note=x.get("skip", ""), checked=datetime.now().isoformat(timespec="seconds"))
             return x, "skip", x.get("skip", ""), 0
-        reg.set(x["group"], x["name"], status="running", note="идёт проверка…")
+        reg.set(x["id"], status="running", note="идёт проверка…")
         t = time.time()
         try:
             p = subprocess.run([sys.executable, "run.py", *x["argv"]], cwd=str(Path(__file__).parent), env=child_env,
@@ -202,7 +289,7 @@ def cmd_check(a):
             code, out = None, (e.stdout or "") if isinstance(e.stdout, str) else ""
         st, note = judge(code, out, x["group"] == "Заготовки")
         sec = round(time.time() - t)
-        reg.set(x["group"], x["name"], status=st, note=note, seconds=sec, checked=datetime.now().isoformat(timespec="seconds"))
+        reg.set(x["id"], status=st, note=note, seconds=sec, checked=datetime.now().isoformat(timespec="seconds"))
         return x, st, note, sec
 
     icons = {"ok": "✅", "part": "⚠️", "fail": "❌", "timeout": "⏱", "need": "🔑", "skip": "·"}
@@ -216,7 +303,7 @@ def cmd_check(a):
                 run_.advance(stage_of[g], done[g][0], done[g][1])
             print(f"{icons.get(st, st)} {g} · {x['name']}: {sec} с {note}")
     counts = {}
-    for x in reg.data["methods"]:
+    for x in reg.read().get("methods", []):
         counts[x["status"]] = counts.get(x["status"], 0) + 1
     print("Итог:", ", ".join(f"{icons.get(k, k)} {v}" for k, v in sorted(counts.items())))
     print(f"→ {reg.path}")
@@ -226,7 +313,7 @@ def cmd_check(a):
 
 def register(sub):
     p = sub.add_parser("check", help="проверить все методы на маленьких запросах → кнопки методов в панели задач")
-    p.add_argument("--only", help="только методы, чьё имя или команда начинается так (через запятую); точно — команда:метод, например domains:ahrefs")
+    p.add_argument("--only", help="только методы, чьё имя или команда начинается так (через запятую); точно — id команда:метод, например domains:ahrefs")
     p.add_argument("--no-stubs", action="store_true", help="без заготовок")
     p.add_argument("--workers", type=int, default=4, help="сколько методов проверять одновременно (4)")
     p.add_argument("--timeout", type=int, default=30, help="предел на метод, минут (30)")

@@ -72,13 +72,50 @@ code { font-family: var(--mono); font-size: 12.5px; }
         border: 2px solid transparent; color: #fff; background: var(--muted); }
 .pill.ok { background: var(--green); } .pill.part { background: var(--amber); } .pill.fail, .pill.timeout { background: var(--red); }
 .pill.need { background: #7b61c9; } .pill.skip, .pill.unknown { background: transparent; color: var(--muted); border-color: var(--line); }
-.pill.running { background: var(--blue); animation: pulse 1.2s ease-in-out infinite; }
+.pill.running { background: var(--blue); animation: pulse .9s ease-in-out infinite; }
 .pill.sel { outline: 3px solid var(--text); outline-offset: 1px; }
-@keyframes pulse { 50% { opacity: .55; } }
+@keyframes pulse { 50% { opacity: .3; } }
 .mdetail { margin-top: 12px; border-top: 1px solid var(--line); padding-top: 10px; font-size: 13.5px; }
 .mdetail pre { display: inline-block; margin: 6px 8px 0 0; max-width: 100%; }
 .copy { font: inherit; font-size: 12.5px; border: 1px solid var(--line); background: var(--bg); color: var(--text); border-radius: 6px; padding: 2px 10px; cursor: pointer; }
-@media (max-width: 640px) { .mgroup { flex-direction: column; } .mgroup .gname { width: auto; padding-top: 0; } }
+.pill.queued { background: transparent; color: var(--blue); border: 2px dashed var(--blue); animation: pulse 1.6s ease-in-out infinite; }
+.legend i.pill { animation: none; }
+.card.coll { padding: 8px 14px; margin-bottom: 8px; }
+.donelist { margin-top: 12px; }
+.donelist .card:last-child { margin-bottom: 0; }
+.card.coll .top { gap: 8px 10px; }
+.card.coll .title { font-size: 14.5px; }
+.card.coll .err { margin-top: 4px; }
+.args1 { font-family: var(--mono); font-size: 12px; color: var(--muted); flex: 1 1 160px; min-width: 0;
+         white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.outs1 a { color: var(--blue); text-decoration: none; font-size: 13px; margin-right: 10px; }
+.outs1 a:hover { text-decoration: underline; }
+.mdetail .close { float: right; color: var(--muted); text-decoration: none; font-size: 13px; }
+.tog { font: inherit; font-size: 17px; width: 28px; height: 28px; border-radius: 6px; border: 1px solid var(--line); background: var(--bg);
+       color: var(--text); cursor: pointer; line-height: 1; padding: 0; flex: none; align-self: center; }
+.mhead .ttl { cursor: pointer; user-select: none; }
+.methods.coll { padding-bottom: 12px; }
+.methods.coll .mhead { margin-bottom: 0; }
+.about { font-size: 13px; color: var(--muted); margin: 2px 0 0 38px; max-width: 860px; }
+.about a { color: var(--blue); text-decoration: none; }
+.about a:hover { text-decoration: underline; }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; font-size: 12.5px; color: var(--muted); margin: 8px 0 2px 38px; }
+.legend span { display: inline-flex; align-items: center; gap: 5px; }
+.legend i.pill { display: inline-block; width: 22px; height: 12px; padding: 0; cursor: default; }
+@media (max-width: 640px) { .about, .legend { margin-left: 0; } }
+.run { font: inherit; font-size: 12.5px; border: 1px solid var(--blue); background: transparent; color: var(--blue); border-radius: 6px;
+       padding: 2px 10px; cursor: pointer; }
+.run:hover { background: var(--blue); color: #fff; }
+.run:disabled { opacity: .5; cursor: default; background: transparent; color: var(--blue); }
+.gname .run { display: block; margin-top: 4px; font-size: 11.5px; padding: 1px 8px; }
+.filters .run { border-radius: 999px; margin-left: auto; border-color: var(--blue); background: transparent; color: var(--blue); }
+.filters .run:hover { background: var(--blue); color: #fff; }
+.ckline { font-size: 13px; color: var(--blue); display: inline-flex; gap: 8px; align-items: baseline; flex-wrap: wrap; }
+.stopb { font: inherit; font-size: 12px; border: 1px solid var(--red); background: transparent; color: var(--red); border-radius: 6px;
+         padding: 1px 8px; cursor: pointer; }
+.mmsg { font-size: 13px; color: var(--red); margin-top: 6px; }
+@media (max-width: 640px) { .mgroup { flex-direction: column; } .mgroup .gname { width: auto; padding-top: 0; }
+                            .gname .run { display: inline-block; margin: 0 0 0 8px; } .filters .run { margin-left: 0; } }
 </style>
 </head>
 <body>
@@ -93,48 +130,134 @@ code { font-family: var(--mono); font-size: 12.5px; }
 </main>
 <script>
 const openLogs = new Set();
-let mFilter = "all", mSel = null, lastState = null;
+let mFilter = "all", mSel = null, lastState = null, mMsg = {};
+const pending = new Map();   // «skill|id» → когда нажали: мигает сразу, не дожидаясь ответа панели
 const MST = {ok: "работает", part: "частично", fail: "не работает", timeout: "таймаут", need: "нужен доступ",
-             skip: "не проверяется", unknown: "не проверялся", running: "идёт проверка"};
+             skip: "не проверяется", unknown: "не проверялся", running: "идёт проверка", queued: "в очереди на проверку"};
 const MFILTERS = {all: "все", ok: "работают", bad: "не работают", other: "не проверены / нужен доступ"};
 
-function mPass(m) {
-  if (mFilter === "all") return true;
-  if (mFilter === "ok") return m.status === "ok";
-  if (mFilter === "bad") return ["fail", "timeout", "part"].includes(m.status);
-  return ["need", "skip", "unknown"].includes(m.status);
+// блоки методов по умолчанию свёрнуты; развёрнутые запоминаются в этом браузере (нет хранилища — всегда свёрнуты)
+let expanded = {};
+try { expanded = JSON.parse(localStorage.getItem("tp-methods-open") || "{}") || {}; } catch (e) { expanded = {}; }
+function saveExpanded() { try { localStorage.setItem("tp-methods-open", JSON.stringify(expanded)); } catch (e) {} }
+const ABOUT = "Какие методы скилла сейчас работают — итог последней проверки каждого на маленьком запросе. "
+            + "Перед задачей видно, на что можно рассчитывать; после сбоя, смены прокси или обновления — перепроверьте нужные методы кнопкой.";
+const LEGEND = [["ok", "работает"], ["part", "частично"], ["fail", "не работает"], ["need", "нужен доступ"],
+                ["unknown", "не проверялся"], ["queued", "в очереди"], ["running", "проверяется"]];
+
+// статус кнопки с учётом очереди панели: только что нажали, стоит в очереди или ждёт внутри идущей проверки
+function mState(m, ck, skill) {
+  if (m.status === "running") return "running";
+  if (ck && ck.queue.includes(m.id)) return "queued";
+  if (ck && ck.current.includes(m.id) && (!m.checked || m.checked < ck.started)) return "queued";
+  const t = pending.get(skill + "|" + m.id);
+  if (t && Date.now() - t < 15000) return "queued";
+  return m.status;
 }
 
-function renderMethods(regs) {
+function mPass(s) {
+  if (mFilter === "all") return true;
+  if (mFilter === "ok") return s === "ok";
+  if (mFilter === "bad") return ["fail", "timeout", "part"].includes(s);
+  return ["need", "skip", "unknown"].includes(s);
+}
+
+function runBtn(skill, ids, text, title) {
+  return ids.length ? `<button class="run" data-skill="${esc(skill)}" data-ids="${esc(ids.join(","))}" title="${esc(title)}">${text}</button>` : "";
+}
+
+function renderMethods(regs, checks) {
   const box = document.getElementById("methods");
   if (!regs || !regs.length) { box.innerHTML = ""; return; }
   box.innerHTML = regs.map((r, ri) => {
+    const ck = (checks || {})[r.skill];
+    const st = m => mState(m, ck, r.skill);
+    // нажатие дошло до панели — дальше мигание ведёт её состояние
+    r.methods.forEach(m => { const k = r.skill + "|" + m.id, t = pending.get(k);
+      if (t && ((ck && (ck.queue.includes(m.id) || ck.current.includes(m.id))) || m.status === "running"
+                || (m.checked && new Date(m.checked).getTime() >= t - 2000))) pending.delete(k); });
+    const free = m => r.checkable && m.id && m.example && !["running", "queued"].includes(st(m));   // можно поставить в очередь
     const cnt = {};
-    r.methods.forEach(m => cnt[m.status] = (cnt[m.status] || 0) + 1);
-    const summary = ["ok", "part", "fail", "timeout", "need", "running", "unknown", "skip"].filter(k => cnt[k])
+    r.methods.forEach(m => { const s = st(m); cnt[s] = (cnt[s] || 0) + 1; });
+    const summary = ["ok", "part", "fail", "timeout", "need", "running", "queued", "unknown", "skip"].filter(k => cnt[k])
       .map(k => `${MST[k]} ${cnt[k]}`).join(" · ");
+    const nRun = cnt.running || 0, nQ = cnt.queued || 0;
+    const ckLine = (nRun || nQ || (ck && (ck.running || ck.external)))
+      ? `<span class="ckline">▶ проверка: идёт ${nRun} · в очереди ${nQ}${ck && ck.external ? " · запущена не из панели" : ""}
+         ${ck && (ck.running || ck.queue.length) ? `<button class="stopb" data-skill="${esc(r.skill)}">остановить</button>` : ""}</span>` : "";
+    const isColl = !expanded[r.skill];
+    const head = `<div class="mhead"><button class="tog" data-skill="${esc(r.skill)}" title="${isColl ? "развернуть" : "свернуть"}">${isColl ? "▸" : "▾"}</button>
+        <b class="ttl" data-skill="${esc(r.skill)}">${esc(r.title || r.skill)}</b>
+        <span class="muted small">${summary}${r.updated ? ` · обновлено ${day(r.updated)} ${hm(r.updated)}` : ""}</span>${ckLine}</div>
+        <div class="about">${esc(r.about || ABOUT)}${isColl ? ` <a href="#" class="ttl" data-skill="${esc(r.skill)}">развернуть</a>` : ""}</div>
+        ${isColl ? "" : `<div class="legend">${LEGEND.map(([k, t]) => `<span><i class="pill ${k}"></i>${t}</span>`).join("")}
+          ${r.checkable ? `<span><b>нажмите на метод — он проверится</b></span>` : ""}</div>`}
+        ${mMsg[r.skill] ? `<div class="mmsg">${esc(mMsg[r.skill])}</div>` : ""}
+        ${ck && ck.error ? `<div class="mmsg">${esc(ck.error)}</div>` : ""}`;
+    if (isColl) return `<div class="methods coll">${head}</div>`;
     const groups = {};
-    r.methods.forEach((m, mi) => { if (mPass(m)) (groups[m.group] = groups[m.group] || []).push([m, mi]); });
-    const rows = Object.entries(groups).map(([g, ms]) => `<div class="mgroup"><div class="gname">${esc(g)}</div><div class="pills">`
-      + ms.map(([m, mi]) => `<button class="pill ${m.status}${mSel === ri + ":" + mi ? " sel" : ""}" data-k="${ri}:${mi}"
-          title="${esc(MST[m.status] || m.status)}${m.seconds != null ? " · " + dur(m.seconds) : ""}${m.note ? " · " + esc(m.note) : ""}">${esc(m.name)}</button>`).join("")
-      + `</div></div>`).join("");
-    let detail = "";
-    if (mSel && mSel.startsWith(ri + ":")) {
-      const m = r.methods[+mSel.split(":")[1]];
-      if (m) detail = `<div class="mdetail"><b>${esc(m.group)} · ${esc(m.name)}</b> — ${esc(m.what || "")}<br>
-        Статус: <b>${esc(MST[m.status] || m.status)}</b>${m.checked ? ` · проверено ${day(m.checked)} ${hm(m.checked)}` : ""}${m.seconds != null ? ` · заняло ${dur(m.seconds)}` : ""}
-        ${m.note ? `<br>${esc(m.note)}` : ""}
-        ${m.example ? `<br><pre>${esc(m.example)}</pre><button class="copy" data-copy="${esc(m.example)}">копировать</button>` : ""}</div>`;
-    }
-    return `<div class="methods"><div class="mhead"><b>${esc(r.title || r.skill)}</b>
-        <span class="muted small">${summary}${r.updated ? ` · обновлено ${day(r.updated)} ${hm(r.updated)}` : ""}</span></div>
-      <div class="filters">${Object.entries(MFILTERS).map(([k, t]) => `<button data-f="${k}" class="${mFilter === k ? "on" : ""}">${t}</button>`).join("")}</div>
+    r.methods.forEach((m, mi) => { if (mPass(st(m))) (groups[m.group] = groups[m.group] || []).push([m, mi]); });
+    const shown = Object.values(groups).flat().map(([m]) => m).filter(free).map(m => m.id);
+    // карточка выбранного метода — сразу под его группой, а не внизу блока
+    const detailOf = m => { const s = st(m); return `<div class="mdetail"><a href="#" class="close" title="закрыть">✕</a>
+        <b>${esc(m.group)} · ${esc(m.name)}</b> — ${esc(m.what || "")}<br>
+        Статус: <b>${esc(MST[s] || s)}</b>${["running", "queued"].includes(s) ? " …" : ""}${m.checked && !["running", "queued"].includes(s) ? ` · проверено ${day(m.checked)} ${hm(m.checked)}` : ""}${m.seconds != null && !["running", "queued"].includes(s) ? ` · заняло ${dur(m.seconds)}` : ""}
+        ${m.note && s !== "queued" ? `<br>${esc(m.note)}` : ""}
+        ${m.example ? `<br><pre>${esc(m.example)}</pre><button class="copy" data-copy="${esc(m.example)}">копировать</button> ` : ""}
+        ${free(m) ? runBtn(r.skill, [m.id], "▶ проверить ещё раз", "поставить в очередь проверки") : ""}</div>`; };
+    const rows = Object.entries(groups).map(([g, ms]) => {
+      const ids = ms.map(([m]) => m).filter(free).map(m => m.id);
+      const sel = ms.find(([m, mi]) => mSel === ri + ":" + mi);
+      return `<div class="mgroup"><div class="gname">${esc(g)}${runBtn(r.skill, ids, "▶ проверить", `проверить группу «${g}»: ${ids.length}`)}</div><div class="pills">`
+        + ms.map(([m, mi]) => { const s = st(m); return `<button class="pill ${s}${mSel === ri + ":" + mi ? " sel" : ""}" data-k="${ri}:${mi}"
+            data-skill="${esc(r.skill)}" data-id="${esc(m.id || "")}" data-free="${free(m) ? 1 : ""}"
+            title="${esc(MST[s] || s)}${m.seconds != null ? " · " + dur(m.seconds) : ""}${m.note ? " · " + esc(m.note) : ""}${free(m) ? " — нажмите, чтобы проверить" : ""}">${esc(m.name)}</button>`; }).join("")
+        + `</div></div>` + (sel ? detailOf(sel[0]) : "");
+    }).join("");
+    const detail = "";
+    return `<div class="methods">${head}
+      <div class="filters">${Object.entries(MFILTERS).map(([k, t]) => `<button data-f="${k}" class="${mFilter === k ? "on" : ""}">${t}</button>`).join("")}
+        ${mFilter === "all" ? "" : runBtn(r.skill, shown, `▶ проверить показанные (${shown.length})`, "поставить в очередь все методы, которые сейчас видны")}</div>
       ${rows || `<div class="muted small" style="margin-top:8px">нет методов с таким статусом</div>`}${detail}</div>`;
   }).join("");
-  box.querySelectorAll(".pill").forEach(b => b.onclick = () => { mSel = mSel === b.dataset.k ? null : b.dataset.k; renderMethods(lastState.methods); });
-  box.querySelectorAll(".filters button").forEach(b => b.onclick = () => { mFilter = b.dataset.f; renderMethods(lastState.methods); });
+  const again = () => renderMethods(lastState.methods, lastState.checks);
+  // клик по методу — открыть его карточку и сразу проверить (если он не в очереди и не проверяется)
+  box.querySelectorAll(".pills .pill").forEach(b => b.onclick = () => {
+    if (b.dataset.free) {
+      mSel = b.dataset.k;
+      const k = b.dataset.skill + "|" + b.dataset.id;
+      pending.set(k, Date.now());
+      again();
+      post("/api/check", {skill: b.dataset.skill, ids: [b.dataset.id]}).then(ok => { if (!ok) { pending.delete(k); again(); } });
+    } else { mSel = mSel === b.dataset.k ? null : b.dataset.k; again(); }
+  });
+  box.querySelectorAll(".mdetail .close").forEach(a => a.onclick = ev => { ev.preventDefault(); mSel = null; again(); });
+  box.querySelectorAll(".filters button[data-f]").forEach(b => b.onclick = () => { mFilter = b.dataset.f; again(); });
   box.querySelectorAll(".copy").forEach(b => b.onclick = () => { navigator.clipboard?.writeText(b.dataset.copy); b.textContent = "скопировано"; });
+  box.querySelectorAll(".tog, .ttl").forEach(b => b.onclick = ev => {
+    ev.preventDefault();
+    const s = b.dataset.skill; expanded[s] = !expanded[s]; if (!expanded[s]) delete expanded[s]; saveExpanded(); again(); });
+  box.querySelectorAll(".run").forEach(b => b.onclick = () => {
+    const ids = b.dataset.ids.split(",");
+    ids.forEach(id => pending.set(b.dataset.skill + "|" + id, Date.now()));
+    post("/api/check", {skill: b.dataset.skill, ids}, b).then(ok => { if (!ok) ids.forEach(id => pending.delete(b.dataset.skill + "|" + id)); });
+  });
+  box.querySelectorAll(".stopb").forEach(b => b.onclick = () => post("/api/check/stop", {skill: b.dataset.skill}, b));
+}
+
+async function post(url, body, btn) {
+  if (btn) { btn.disabled = true; btn.textContent = "…"; }
+  let ok = false;
+  try {
+    const r = await fetch(url, {method: "POST", headers: {"Content-Type": "application/json", "X-Panel": "1"}, body: JSON.stringify(body)});
+    const j = await r.json().catch(() => ({}));
+    ok = r.ok;
+    mMsg[body.skill] = r.ok ? "" : (j.error || `ошибка ${r.status}`);
+  } catch (e) {
+    mMsg[body.skill] = "нет связи с панелью — запущен ли python panel.py?";
+  }
+  tick();
+  return ok;
 }
 const STATUS = {running: "идёт", done: "готово", error: "ошибка", stale: "не отвечает", partial: "готово: не всё получено"};
 
@@ -165,9 +288,39 @@ function renderAP(ap) {
     : `<span>${dot}<b>A-Parser не отвечает</b></span><span class="muted">запуск: <code>python server.py start</code></span>`;
 }
 
+// завершённые задачи свёрнуты в строку; развёрнутые вручную — до перезагрузки страницы
+const openCards = new Set();
+
+// заголовок задачи: поле title запуска; у проверки методов — что проверяли («rkn · check»); иначе «скилл · команда»
+function runTitle(r) {
+  if (r.title) return r.title;
+  if (r.command === "check") {
+    const m = /--only\s+(\S+)/.exec(r.args || "");
+    if (!m) return "все методы · check";
+    const names = m[1].split(",").filter(Boolean).map(x => x.split(":").pop());
+    return (names.length > 3 ? names.slice(0, 3).join(", ") + ` +${names.length - 3}` : names.join(", ")) + " · check";
+  }
+  return `${r.skill} · ${r.command}`;
+}
+
+function cardShort(r, st) {
+  const outs = (r.outputs || []).map(o => `<a href="${o.href}" title="${esc(o.path)}">${esc(o.name)}</a>`).join("");
+  return `<div class="card ${st} coll">
+    <div class="top"><button class="tog" data-card="${esc(r.id)}" title="развернуть">▸</button>
+      <span class="title" title="${esc(r.skill)} · ${esc(r.command)}">${esc(runTitle(r))}</span>
+      <span class="chip ${st}">${STATUS[st] || esc(st)}</span>
+      <span class="muted small">${day(r.started)} ${hm(r.started)} · ${st === "stale" ? "шло" : "заняло"} ${dur(r.elapsed)}${r.total ? ` · ${num(r.done)} из ${num(r.total)}, успешно ${num(r.good)}` : ""}</span>
+      <span class="args1">${esc(r.args)}</span>
+      ${outs ? `<span class="outs1">${outs}</span>` : ""}</div>
+    ${r.error ? `<div class="err small">${esc(r.error)}</div>` : ""}
+  </div>`;
+}
+
 function card(r) {
   // завершилась, но часть запросов без данных — жёлтым, чтобы не выглядело полным успехом
   const st = (r.status === "done" && r.total && r.good < r.done) ? "partial" : r.status;
+  const active = r.status === "running";
+  if (!active && !openCards.has(r.id)) return cardShort(r, st);
   const stages = (r.stages || []).map(s => {
     const pct = s.total ? Math.round(100 * Math.min(s.done, s.total) / s.total) : 0;
     const mark = s.finished ? "✓" : (st === "running" ? "…" : "");
@@ -183,7 +336,8 @@ function card(r) {
     ? `прошло ${dur(r.elapsed)}${r.eta != null ? ` · осталось ≈ ${dur(r.eta)}` : ""}`
     : `${st === "done" ? "заняло" : "шло"} ${dur(r.elapsed)}`;
   return `<div class="card ${st}">
-    <div class="top"><span class="title">${esc(r.skill)} · ${esc(r.command)}</span>
+    <div class="top">${active ? "" : `<button class="tog" data-card="${esc(r.id)}" title="свернуть">▾</button>`}
+      <span class="title" title="${esc(r.skill)} · ${esc(r.command)}">${esc(runTitle(r))}</span>
       <span class="chip ${st}">${STATUS[st] || esc(st)}</span>
       <span class="muted small">${day(r.started)} ${hm(r.started)}</span></div>
     <div class="args">${esc(r.args)}</div>
@@ -198,9 +352,29 @@ function card(r) {
   </div>`;
 }
 
+// блок «Завершённые» — как блок методов: по умолчанию свёрнут, развёрнутость запоминается в этом браузере
+let doneOpen = false;
+try { doneOpen = localStorage.getItem("tp-done-open") === "1"; } catch (e) {}
+function saveDoneOpen() { try { localStorage.setItem("tp-done-open", doneOpen ? "1" : "0"); } catch (e) {} }
+
+function doneBlock(rest) {
+  const cnt = {};
+  rest.forEach(r => { const s = (r.status === "done" && r.total && r.good < r.done) ? "partial" : r.status; cnt[s] = (cnt[s] || 0) + 1; });
+  const summary = ["done", "partial", "error"].filter(k => cnt[k]).map(k => `${STATUS[k]} ${cnt[k]}`).join(" · ");
+  const last = rest.map(r => r.finished || r.started || "").sort().pop();
+  return `<div class="methods${doneOpen ? "" : " coll"}">
+    <div class="mhead"><button class="tog" data-block="done" title="${doneOpen ? "свернуть" : "развернуть"}">${doneOpen ? "▾" : "▸"}</button>
+      <b class="ttl" data-block="done">Завершённые — ${rest.length}</b>
+      <span class="muted small">${summary}${last ? ` · последняя ${day(last)} ${hm(last)}` : ""}</span></div>
+    <div class="about">Задачи, которые уже закончились: итог, сколько заняли, ссылки на результаты и ошибки. Идущие показываются
+      выше, развёрнутыми; закончившаяся задача переезжает сюда сама.${doneOpen ? "" : ` <a href="#" data-block="done">развернуть</a>`}</div>
+    ${doneOpen ? `<div class="donelist">${rest.map(card).join("")}</div>` : ""}
+  </div>`;
+}
+
 function render(state) {
   lastState = state;
-  renderMethods(state.methods);
+  renderMethods(state.methods, state.checks);
   document.getElementById("upd").textContent = `обновлено ${hm(state.now)} · каждые 2 с`;
   renderAP(state.aparser);
   const runs = state.runs || [];
@@ -214,7 +388,14 @@ function render(state) {
     return;
   }
   box.innerHTML = (active.length ? `<h2>Сейчас идут — ${active.length}</h2>` + active.map(card).join("") : "")
-                + (rest.length ? `<h2>Завершённые — ${rest.length}</h2>` + rest.map(card).join("") : "");
+                + (rest.length ? doneBlock(rest) : "");
+  box.querySelectorAll("[data-block=done]").forEach(b => b.onclick = ev => {
+    ev.preventDefault(); doneOpen = !doneOpen; saveDoneOpen(); render(lastState); });
+  box.querySelectorAll(".tog[data-card]").forEach(b => b.onclick = () => {
+    const id = b.dataset.card;
+    if (openCards.has(id)) openCards.delete(id); else openCards.add(id);
+    render(lastState);
+  });
   box.querySelectorAll("details").forEach(d => d.addEventListener("toggle", () => {
     const id = d.dataset.id;
     if (d.open) { openLogs.add(id); openLogs.delete("closed:" + id); } else { openLogs.delete(id); openLogs.add("closed:" + id); }

@@ -4,8 +4,11 @@
     python panel.py --port 8771
 
 Команды скилла пишут JSON-файлы запусков в data\\_runs (формат — README, раздел «Панель задач»).
-Панель файлы только читает: ничего не удаляет и не меняет. Слушает только 127.0.0.1 —
-из интернета её не видно. Результаты открываются только из папки data скилла.
+Панель файлы читает и ничего не удаляет. Единственное действие — по кнопке запускает проверку
+методов скилла командой из его реестра (поле check): одна проверка за раз на скилл, остальное — в
+очереди; «остановить» гасит проверку и помечает её запуск остановленным. Слушает только 127.0.0.1 —
+из интернета её не видно; запуск принимается только со страницы самой панели. Результаты
+открываются только из папки data скилла.
 """
 
 from __future__ import annotations
@@ -13,7 +16,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
+import signal
+import subprocess
 import sys
+import threading
 import time
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -73,14 +80,171 @@ def load_runs() -> list[dict]:
     return running + rest
 
 
-def load_methods() -> list[dict]:
-    """Реестры методов (кнопки наверху): у каждого метода статус последней проверки."""
-    out = []
-    for f in sorted(METHODS.glob("*.json")):
+def alive_runs() -> dict[str, dict]:
+    """Запуски, которые идут прямо сейчас (статус running и свежий пульс), по id."""
+    out, now = {}, time.time()
+    for f in RUNS.glob("*.json"):
         try:
-            out.append(json.loads(f.read_text(encoding="utf-8")))
+            if now - f.stat().st_mtime > 2 * STALE_SEC:
+                continue
+            r = json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             continue
+        beat = _parse(r.get("heartbeat") or r.get("updated"))
+        if r.get("status") == "running" and beat and (datetime.now() - beat).total_seconds() <= STALE_SEC:
+            out[r.get("id") or f.stem] = r
+    return out
+
+
+def registries() -> dict[str, dict]:
+    """Реестры методов скиллов по имени скилла."""
+    out = {}
+    for f in sorted(METHODS.glob("*.json")):
+        try:
+            r = json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            continue
+        out[r.get("skill") or f.stem] = r
+    return out
+
+
+def check_spec(reg: dict):
+    """Команда проверки из реестра: (python, папка, аргументы) — или None, если её нет или она подозрительная."""
+    c = reg.get("check") or {}
+    cwd, args = Path(c.get("cwd") or "."), c.get("args") or []
+    py = Path(c.get("python") or sys.executable)
+    if not (c.get("cwd") and cwd.is_dir() and args and all(isinstance(a, str) for a in args)
+            and (cwd / args[0]).is_file() and "{ids}" in args and py.is_file() and py.name.lower().startswith("python")):
+        return None
+    return py, cwd, args
+
+
+def load_methods(alive: dict[str, dict]) -> list[dict]:
+    """Реестры методов (кнопки наверху): у каждого метода статус последней проверки."""
+    out = []
+    for r in registries().values():
+        for m in r.get("methods", []):
+            # «идёт», а проверки уже нет (закрыли, упала) — показать прежний итог
+            if m.get("status") == "running" and m.get("run") not in alive:
+                m["status"] = m.get("prev_status") or "unknown"
+                m["note"] = "проверку прервали — показан прежний итог" + (f": {m['prev_note']}" if m.get("prev_note") else "")
+        r["checkable"] = check_spec(r) is not None
+        r.pop("check", None)
+        out.append(r)
+    return out
+
+
+# --- проверка методов по кнопке: очередь, одна проверка за раз на скилл ---
+
+CHECK_LOGS = RUNS.parent / "checks"
+ID_RE = re.compile(r"^[\w.:-]{1,80}$")
+_checks: dict[str, dict] = {}     # скилл → {"proc", "current", "queue", "started", "error"}
+_ck_lock = threading.Lock()
+
+
+def _ck(skill: str) -> dict:
+    return _checks.setdefault(skill, {"proc": None, "current": [], "queue": [], "started": None, "error": None})
+
+
+def pump():
+    """Запустить очередь, если скилл свободен: ни своей проверки, ни проверки из терминала."""
+    alive = alive_runs()
+    busy_ext = {r.get("skill") for r in alive.values() if r.get("command") == "check"}
+    regs = registries()
+    with _ck_lock:
+        for skill, st in _checks.items():
+            p = st["proc"]
+            if p and p.poll() is not None:
+                st["proc"], st["current"] = None, []
+            if not st["queue"] or st["proc"] or skill in busy_ext:
+                continue
+            spec = check_spec(regs.get(skill, {}))
+            if not spec:
+                st["queue"], st["error"] = [], "в реестре нет команды проверки"
+                continue
+            py, cwd, args = spec
+            ids, st["queue"] = st["queue"], []
+            argv = [str(py)] + [a.replace("{ids}", ",".join(ids)) for a in args]
+            CHECK_LOGS.mkdir(parents=True, exist_ok=True)
+            log_path = CHECK_LOGS / f"{skill}_{datetime.now():%Y%m%d-%H%M%S}.log"
+            with open(log_path, "w", encoding="utf-8") as log:
+                kw = ({"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP | subprocess.CREATE_NO_WINDOW} if os.name == "nt"
+                      else {"start_new_session": True})
+                st["proc"] = subprocess.Popen(argv, cwd=str(cwd), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                                              env={**os.environ, "PYTHONIOENCODING": "utf-8"}, **kw)
+            st["current"], st["started"], st["error"] = ids, datetime.now().isoformat(timespec="seconds"), None
+            print(f"проверка {skill}: {len(ids)} методов, лог — {log_path}", flush=True)
+
+
+def _pump_loop():
+    while True:
+        try:
+            pump()
+        except Exception as e:                      # очередь не должна ронять панель
+            print("очередь проверок:", e, flush=True)
+        time.sleep(2)
+
+
+def enqueue(skill: str, ids: list) -> tuple[int, dict]:
+    reg = registries().get(skill or "")
+    if not reg:
+        return 404, {"error": f"нет реестра методов «{skill}»"}
+    if not check_spec(reg):
+        return 400, {"error": "в реестре нет команды проверки — один раз запустите проверку скилла из терминала новой версией"}
+    known = {m.get("id") for m in reg.get("methods", []) if m.get("id") and m.get("example")}
+    ids = [i for i in dict.fromkeys(ids if isinstance(ids, list) else []) if isinstance(i, str) and ID_RE.match(i) and i in known]
+    if not ids:
+        return 400, {"error": "таких методов в реестре нет"}
+    with _ck_lock:
+        st = _ck(skill)
+        add = [i for i in ids if i not in st["queue"] and i not in st["current"]]
+        st["queue"] += add
+    pump()
+    return 200, {"queued": len(add)}
+
+
+def _mark_stopped(pid: int):
+    """Файл запуска остановленной проверки: «ошибка — остановлено из панели», иначе висел бы «не отвечает»."""
+    for rid, r in alive_runs().items():
+        if r.get("pid") != pid:
+            continue
+        r.update(status="error", error="остановлено кнопкой в панели", finished=datetime.now().isoformat(timespec="seconds"))
+        path = RUNS / f"{rid}.json"
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(r, ensure_ascii=False, indent=1), encoding="utf-8")
+        os.replace(tmp, path)
+
+
+def stop(skill: str) -> tuple[int, dict]:
+    with _ck_lock:
+        st = _ck(skill or "")
+        dropped, st["queue"] = len(st["queue"]), []
+        p = st["proc"]
+    killed = False
+    if p and p.poll() is None:
+        if os.name == "nt":           # вместе с дочерними run.py
+            subprocess.run(["taskkill", "/T", "/F", "/PID", str(p.pid)], capture_output=True, creationflags=subprocess.CREATE_NO_WINDOW)
+        else:
+            os.killpg(p.pid, signal.SIGKILL)
+        killed = True
+        try:
+            p.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            pass
+        _mark_stopped(p.pid)
+    with _ck_lock:
+        st["proc"], st["current"] = None, []
+    return 200, {"stopped": killed, "dropped": dropped}
+
+
+def checks_state(alive: dict[str, dict]) -> dict:
+    ext = {r.get("skill") for r in alive.values() if r.get("command") == "check"}
+    with _ck_lock:
+        out = {s: {"current": st["current"], "queue": st["queue"], "started": st["started"], "error": st["error"],
+                   "running": bool(st["proc"] and st["proc"].poll() is None)} for s, st in _checks.items()}
+    for s in ext:       # проверка, запущенная не из панели (из терминала или прошлой панелью)
+        out.setdefault(s, {"current": [], "queue": [], "started": None, "error": None, "running": False})
+        out[s]["external"] = not out[s]["running"]
     return out
 
 
@@ -144,14 +308,44 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(body)
 
+    def _json(self, code: int, obj):
+        return self._send(code, json.dumps(obj, ensure_ascii=False, default=str).encode("utf-8"), "application/json; charset=utf-8")
+
+    def _own_page(self) -> bool:
+        """Запрос со страницы самой панели. Чужой сайт, открытый в том же браузере, не должен
+        запускать проверки: у него другой Origin, а заголовок X-Panel без разрешения CORS он не пошлёт."""
+        port = self.server.server_address[1]
+        hosts = {f"127.0.0.1:{port}", f"localhost:{port}"}
+        origin = self.headers.get("Origin")
+        return (self.headers.get("Host") in hosts and self.headers.get("X-Panel") == "1"
+                and (not origin or origin in {f"http://{h}" for h in hosts}))
+
+    def do_POST(self):
+        u = urlsplit(self.path)
+        if not self._own_page():
+            return self._json(403, {"error": "только со страницы панели"})
+        n = int(self.headers.get("Content-Length") or 0)
+        if n > 100_000:
+            return self._json(413, {"error": "слишком большой запрос"})
+        try:
+            body = json.loads(self.rfile.read(n) or b"{}")
+        except ValueError:
+            return self._json(400, {"error": "не JSON"})
+        if u.path == "/api/check":
+            return self._json(*enqueue(body.get("skill"), body.get("ids")))
+        if u.path == "/api/check/stop":
+            return self._json(*stop(body.get("skill")))
+        return self._json(404, {"error": "not found"})
+
     def do_GET(self):
         u = urlsplit(self.path)
         if u.path == "/":
             return self._send(200, (SKILL / "panel.html").read_bytes(), "text/html; charset=utf-8")
         if u.path == "/api/state":
-            body = json.dumps({"now": datetime.now().isoformat(timespec="seconds"), "runs_dir": str(RUNS),
-                               "runs": load_runs(), "methods": load_methods(), "aparser": aparser_state()}, ensure_ascii=False, default=str)
-            return self._send(200, body.encode("utf-8"), "application/json; charset=utf-8")
+            alive = alive_runs()
+            return self._json(200, {"now": datetime.now().isoformat(timespec="seconds"), "runs_dir": str(RUNS),
+                                    "runs": load_runs(), "methods": load_methods(alive), "checks": checks_state(alive),
+                                    "aparser": aparser_state()})
         if u.path == "/open":
             p = Path(parse_qs(u.query).get("path", [""])[0])
             try:
@@ -178,6 +372,7 @@ def main() -> int:
     except OSError:
         print(f"Порт {x.port} занят — запустите с другим: python panel.py --port {x.port + 1}", flush=True)
         return 1
+    threading.Thread(target=_pump_loop, daemon=True).start()
     print(f"Панель задач: http://127.0.0.1:{x.port}/  (запуски — {RUNS})", flush=True)
     try:
         srv.serve_forever()

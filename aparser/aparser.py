@@ -126,13 +126,50 @@ def _overrides(overrides: dict | None) -> list[dict]:
     return [{"type": "override", "id": k, "value": v} for k, v in (overrides or {}).items()]
 
 
-def _reshape(parser: str, res: dict, keep: tuple = ()) -> dict:
+class Result(dict):
+    """Ответ парсера, который помнит, какие поля прочитала команда (get, [], обход целиком).
+    Непрочитанные непустые поля common.save() выводит на лист «прочие поля» — чтобы ничего,
+    что пришло от A-Parser (в том числе новые поля после обновления), не терялось молча."""
+
+    def __init__(self, *args, **kw):
+        super().__init__(*args, **kw)
+        self.used: set = set()
+
+    def get(self, k, default=None):
+        self.used.add(k)
+        return super().get(k, default)
+
+    def __getitem__(self, k):
+        self.used.add(k)
+        return super().__getitem__(k)
+
+    def _all(self):
+        self.used.update(super().keys())
+
+    def __iter__(self):
+        self._all()
+        return super().__iter__()
+
+    def keys(self):
+        self._all()
+        return super().keys()
+
+    def items(self):
+        self._all()
+        return super().items()
+
+    def values(self):
+        self._all()
+        return super().values()
+
+
+def _reshape(parser: str, res: dict, keep: tuple = ()) -> Result:
     """Результат rawResults → плоские поля + массивы списков словарей."""
     sch = schema(parser)
     q = res.get("query") or {}
     info = res.get("info") or {}
-    out = {"query": q.get("orig") or q.get("first") or q.get("query"),
-           "success": info.get("success"), "retries": info.get("retries")}
+    out = Result({"query": q.get("orig") or q.get("first") or q.get("query"),
+                  "success": info.get("success"), "retries": info.get("retries")})
     for k, v in res.items():
         if k in ("query", "info", "success") or (k in DROP_FIELDS and k not in keep):
             continue
@@ -141,7 +178,7 @@ def _reshape(parser: str, res: dict, keep: tuple = ()) -> dict:
             if v and not isinstance(v[0], dict):
                 n = len(names)
                 v = [dict(zip(names, v[i:i + n])) for i in range(0, len(v), n)]
-            out[k] = v
+            out[k] = [Result(x) if isinstance(x, dict) else x for x in v]
         else:
             out[k] = v
     return out

@@ -3,6 +3,7 @@ Majestic, Mustat, SecurityTrails, IP и хостинг, проверка ссы�
 
 from __future__ import annotations
 
+import json
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -29,14 +30,36 @@ def _https(d):
     return f"https://{d}/"
 
 
+def _dns_ips(r) -> str:
+    """Все IP домена; ip — первый из них, поэтому берётся, только если списка нет."""
+    one, many = val(r.get("ip")), joined(r.get("ips"), "ip")
+    return many or one
+
+
+def _dns_records(r) -> str:
+    """DNS-записи Net::DNS (JSON-строка в поле entry) → «A 1.2.3.4 (TTL 300), …». Тип записей — опция
+    query_type парсера, по умолчанию A."""
+    out = []
+    for x in r.get("records") or []:
+        try:
+            e = json.loads(x.get("entry") or "{}")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        data = e.get("data")
+        out.append(f"{e.get('type')} {json.dumps(data, ensure_ascii=False) if isinstance(data, (dict, list)) else data} (TTL {e.get('ttl')})")
+    return ", ".join(out)
+
+
 # проверка → (парсер, запрос из домена, настройки, колонки из результата)
 CHECKS = {
     "whois": ("Net::Whois", _d, {}, lambda r: {
         "зарегистрирован": val(r.get("registered")), "регистратор": val(r.get("registrar")), "создан": val(r.get("creation_date")),
-        "оплачен до": val(r.get("expire_date")), "освобождается": val(r.get("free_date")), "NS": joined(r.get("ns"), "server")}),
+        "обновлён": val(r.get("updated_date")), "оплачен до": val(r.get("expire_date")), "освобождается": val(r.get("free_date")),
+        # статусы домена (clientHold, redemptionPeriod, pendingDelete…) — для дропов важно, на каком он этапе
+        "статусы": joined(r.get("statuses"), "status"), "NS": joined(r.get("ns"), "server")}),
     "archive": ("Rank::Archive", _d, {}, lambda r: {
         "архив: первый снимок": val(r.get("first")), "архив: последний": val(r.get("last")), "архив: снимков": val(r.get("times"))}),
-    "dns": ("Net::DNS", _d, {}, lambda r: {"IP": joined(r.get("ips"), "ip") or val(r.get("ip"))}),
+    "dns": ("Net::DNS", _d, {}, lambda r: {"IP": _dns_ips(r), "DNS: записи": _dns_records(r)}),
     "cms": ("Rank::CMS", _http, {"useproxy": 0}, lambda r: {"CMS": joined(r.get("list"), "cms") or val(r.get("cms"))}),
     "sqi": ("SE::Yandex::SQI", _d, {}, lambda r: {
         "ИКС": val(r.get("sqi")), "Яндекс: рейтинг": val(r.get("rating")), "Яндекс: отзывов": val(r.get("reviews")),
@@ -61,7 +84,8 @@ CHECKS = {
         "Majestic TF": val(r.get("trustflow")), "Majestic CF": val(r.get("citationflow")), "Majestic: беклинков": val(r.get("backlinks")),
         "Majestic: ссылающихся доменов": val(r.get("domains")), "Majestic: URL в индексе": val(r.get("indexed"))}),
     "mustat": ("Rank::Mustat", _d, {}, lambda r: {
-        "Mustat: визитов в день": val(r.get("traffic")), "Mustat: визитов в месяц": val(r.get("trafficMonth")),
+        "Mustat: визитов в день": val(r.get("traffic")), "Mustat: визитов в неделю": val(r.get("trafficWeek")),
+        "Mustat: визитов в месяц": val(r.get("trafficMonth")), "Mustat: визитов в год": val(r.get("trafficYear")),
         "Mustat: стоимость сайта, $": val(r.get("worth")), "Mustat: рейтинг": val(r.get("rating"))}),
     "curlie": ("Rank::Curlie", _d, {}, lambda r: {"в каталоге Curlie": val(r.get("exists"))}),
     "social": ("Rank::Social::Signal", _https, {}, lambda r: {
@@ -251,7 +275,8 @@ def cmd_broken(a):
 def cmd_moz(a):
     doms = [domain_of(d) for d in read_items(a)]
     rows = run("Rank::MOZ", doms, {}, threads=a.threads)
-    sh = {"сводка": [], "ссылающиеся домены": [], "страницы": [], "ключи": [], "конкуренты": [], "вопросы": [], "динамика доменов": []}
+    sh = {"сводка": [], "ссылающиеся домены": [], "страницы": [], "ключи": [], "ключи по кликам": [], "брендовые ключи": [],
+          "featured snippets": [], "позиции ключей": [], "конкуренты": [], "вопросы": [], "динамика доменов": []}
     for d, r in zip(doms, rows):
         sh["сводка"].append({"домен": d, "получено": ok(r), "DA": num_short(r.get("authority")), "Spam Score, %": num_short(r.get("spam")),
                              "ссылающихся доменов": num_short(r.get("linking")), "ключей в ТОПе": num_short(r.get("keywords"))})
@@ -261,6 +286,14 @@ def cmd_moz(a):
             sh["страницы"].append({"домен": d, "url": s.get("url"), "PA": val(s.get("pa"))})
         for s in r.get("topRankingKeywords") or []:
             sh["ключи"].append({"домен": d, "фраза": clean(s.get("keyword")), "позиция": val(s.get("rank"))})
+        for s in r.get("keywordsByClicks") or []:
+            sh["ключи по кликам"].append({"домен": d, "фраза": clean(s.get("keyword")), "видимость": val(s.get("visibility"))})
+        for s in r.get("brandedKeywords") or []:
+            sh["брендовые ключи"].append({"домен": d, "фраза": clean(s.get("keyword")), "частота": num_short(s.get("volume"))})
+        for s in r.get("topFeaturedSnippets") or []:
+            sh["featured snippets"].append({"домен": d, "фраза": clean(s.get("keyword")), "сниппет у домена": val(s.get("owned"))})
+        for s in r.get("keywordRankingDistribution") or []:
+            sh["позиции ключей"].append({"домен": d, "позиции": val(s.get("position")), "ключей": num_short(s.get("keywords"))})
         for s in r.get("topSearchCompetitors") or []:
             sh["конкуренты"].append({"домен": d, "конкурент": s.get("domain"), "DA": val(s.get("da")), "видимость": val(s.get("visibility"))})
         for s in r.get("topQuestions") or []:

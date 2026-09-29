@@ -188,6 +188,8 @@ def cmd_ai(a):
             if e == "openai":
                 row["модель"] = a.model or ap.ENV.get("OPENAI_MODEL") or "gpt-5-mini"
                 row["токенов"] = val(r.get("total_tokens"))
+                row["токенов: вопрос"] = val(r.get("prompt_tokens"))
+                row["токенов: ответ"] = val(r.get("completion_tokens"))
             for s in sites:
                 brand = s.split(".")[0]
                 row[f"{s}: в источниках"] = any(domain_of(x.get("link", "")).endswith(s) for x in src)

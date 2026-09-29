@@ -102,8 +102,70 @@ def _cell(v):
     return v
 
 
+# не выводятся и на лист «прочие поля»: служебное; картинки, превью, id и ссылки на кэш — не данные для
+# отчёта; люди, а не сайты — персональные данные посторонних в отчёт не попадают
+EXTRA_SKIP = {"query", "success", "retries", "stats", "resultsCount", "proxy", "pages", "data", "headers",
+              "thumb", "thumbnail", "avatar", "authorAvatar", "user_avatar", "photo", "logo", "image", "embed",
+              "prevPoster", "prevVideo", "cache", "cachelink", "gotolink", "amp", "flags", "id", "pageid", "revid",
+              "pinner_name", "pinner_username", "user_name", "user_link", "username", "email", "authorUrl",
+              "author_link", "subscribers", "subscriptions", "comments", "follower"}
+EXTRA_MAX = 50000     # строк на листе «прочие поля»
+
+
+def _empty(v) -> bool:
+    return v is None or v == [] or v == {} or (isinstance(v, str) and v.strip().lower() in ("", "none", "null", "undefined"))
+
+
+def extras(raw) -> list[dict]:
+    """Непустые поля ответов A-Parser, которые команда не прочитала (см. ap.Result), — «запрос · поле · значение».
+    Поле списка, которое команда не взяла ни у одного элемента, — строками «список[№].поле»."""
+    def rows_of(o):
+        if isinstance(o, ap.Result) and dict.__contains__(o, "query"):
+            yield o
+        elif isinstance(o, dict):
+            for v in dict.values(o):
+                yield from rows_of(v)
+        elif isinstance(o, (list, tuple)):
+            for v in o:
+                yield from rows_of(v)
+
+    def text(v):
+        return v if isinstance(v, str) else json.dumps(v, ensure_ascii=False, default=str)
+
+    out = []
+    for r in rows_of(raw):
+        if dict.get(r, "success") != 1:
+            continue
+        q = dict.get(r, "query")
+        for k, v in dict.items(r):
+            if k in EXTRA_SKIP or _empty(v):
+                continue
+            items = v if isinstance(v, list) and v and all(isinstance(x, ap.Result) for x in v) else None
+            if items is not None:
+                used = set().union(*(x.used for x in items)) if k in r.used else set()
+                for i, x in enumerate(items, 1):
+                    for f, fv in dict.items(x):
+                        if f not in used and f not in EXTRA_SKIP and not _empty(fv):
+                            out.append({"запрос": q, "поле": f"{k}[{i}].{f}", "значение": text(fv)})
+            elif k not in r.used:
+                out.append({"запрос": q, "поле": k, "значение": text(v)})
+    return out
+
+
 def save(cmd: str, label: str, sheets: dict[str, list[dict] | pd.DataFrame], raw=None) -> Path:
-    """Листы xlsx (пустые, кроме первого, пропускаются) + сырой ответ в .json рядом."""
+    """Листы xlsx (пустые, кроме первого, пропускаются) + ответ в .json рядом. Всё непустое из ответа,
+    что команда не вывела на листы, — на лист «прочие поля»."""
+    if raw is not None:
+        for data in sheets.values():          # строки ответа, выведенные на лист целиком, прочитаны
+            if isinstance(data, list):
+                for x in data:
+                    if isinstance(x, ap.Result):
+                        x.used.update(dict.keys(x))
+        extra = extras(raw)
+        if extra:
+            if len(extra) > EXTRA_MAX:
+                extra = extra[:EXTRA_MAX] + [{"запрос": "", "поле": f"… и ещё {len(extra) - EXTRA_MAX}", "значение": "целиком — в .json"}]
+            sheets = {**sheets, "прочие поля": extra}
     out_dir = ap.DATA / cmd
     out_dir.mkdir(parents=True, exist_ok=True)
     safe = re.sub(r"[^\w.-]+", "_", label or cmd)[:40]
