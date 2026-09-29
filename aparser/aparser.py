@@ -201,7 +201,8 @@ def mask(text: str) -> str:
     «socks5://логин:пароль@хост:порт» и «хост:порт:socks5:логин:пароль» (сессии) —
     поэтому, кроме шаблона, вырезаются сами значения логина и пароля из .env."""
     text = PROXY_AUTH.sub(r"\1***:***@", text)
-    for k in ("APARSER_MIX_PASSWORD", "APARSER_MIX_LOGIN", "APARSER_PROXY_PASSWORD", "APARSER_PROXY_LOGIN",
+    for k in ("APARSER_MIX_PASSWORD", "APARSER_MIX_LOGIN", "APARSER_PREMIUM_PASSWORD", "APARSER_PREMIUM_LOGIN",
+              "APARSER_PROXY_PASSWORD", "APARSER_PROXY_LOGIN",
               "CAPMONSTER_KEY", "APARSER_API_PASSWORD", "OPENAI_API_KEY", "GOOGLE_SAFEBROWSING_KEY"):
         v = ENV.get(k)
         if v and len(v) >= 4:

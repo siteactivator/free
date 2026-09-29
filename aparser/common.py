@@ -104,7 +104,7 @@ def _cell(v):
 
 # не выводятся и на лист «прочие поля»: служебное; картинки, превью, id и ссылки на кэш — не данные для
 # отчёта; люди, а не сайты — персональные данные посторонних в отчёт не попадают
-EXTRA_SKIP = {"query", "success", "retries", "stats", "resultsCount", "proxy", "pages", "data", "headers",
+EXTRA_SKIP = {"query", "success", "retries", "stats", "resultsCount", "totalcount", "suggestquery", "proxy", "pages", "data", "headers",
               "thumb", "thumbnail", "avatar", "authorAvatar", "user_avatar", "photo", "logo", "image", "embed",
               "prevPoster", "prevVideo", "cache", "cachelink", "gotolink", "amp", "flags", "id", "pageid", "revid",
               "pinner_name", "pinner_username", "user_name", "user_link", "username", "email", "authorUrl",
