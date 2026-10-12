@@ -57,6 +57,7 @@ TOP = 10000              # строк на лист по умолчанию
 COMPLEX_RETRIES = 2
 SAMPLED_FALLBACK = ('0.5', '0.1')
 GOALS_PER_REQUEST = 10   # 2 метрики на цель; в одном запросе — до 20 метрик
+GOALS_BY_SOURCE = 9      # то же по источникам: визиты + 2 × 9 = 19 метрик
 
 # (метрика, заголовок, вид): int — целое, pct — проценты, float — дробное, dur — время
 M_SESSION = [
@@ -104,9 +105,9 @@ REPORTS = {
     'countries': ('Страны', [('ym:s:regionCountry', 'Страна')], M_SESSION + M_GOALS, 'страны'),
     'cities':    ('Города', [('ym:s:regionCity', 'Город')], M_SESSION + M_GOALS, 'города'),
 }
-SPECIAL = {'dynamics': 'Динамика', 'goals': 'Цели'}
+SPECIAL = {'dynamics': 'Динамика', 'goals': 'Цели', 'goal_sources': 'Цели по источникам'}
 ORDER = ['dynamics', 'sources', 'engines', 'phrases', 'referrals', 'ads', 'social', 'utm',
-         'entry', 'pages', 'goals', 'devices', 'os', 'browsers', 'countries', 'cities']
+         'entry', 'pages', 'goals', 'goal_sources', 'devices', 'os', 'browsers', 'countries', 'cities']
 # Типы целей из API — на русский, как в интерфейсе; неизвестный тип остаётся как есть
 GOAL_TYPES = {
     'url': 'Посещение страниц', 'number': 'Количество просмотров', 'step': 'Составная цель',
@@ -436,6 +437,7 @@ def cmd_report(a):
     status = []      # (лист, строк, всего строк, выборка, ошибка)
     tables = {}      # данные листов — для панели с графиками
     goal_list = []   # (цель, достижения)
+    goal_src = {}    # цели × источники — для тепловой карты
 
     # Сводка: итоги периода и прошлого периода
     mtot = M_SESSION + M_GOALS
@@ -455,6 +457,10 @@ def cmd_report(a):
         elif key == 'goals':
             title = SPECIAL[key]
             status.append(goals_sheet(wb.create_sheet(title), cid, d1, d2, goal_list))
+            continue
+        elif key == 'goal_sources':
+            title = SPECIAL[key]
+            status.append(goal_sources_sheet(wb.create_sheet(title), cid, d1, d2, goal_list, goal_src))
             continue
         else:
             title, dims, metrics, _ = REPORTS[key]
@@ -485,7 +491,7 @@ def cmd_report(a):
         try:
             log('   панель с графиками…')
             ctx = panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list,
-                                status, out.name, cid, a.no_compare)
+                                status, out.name, cid, a.no_compare, goal_src)
             pics = charts.build(ctx, folder / f'charts_{d1.isoformat()}_{d2.isoformat()}')
             charts.excel_panel(wb, ctx, pics)
             dashboard = charts.html_dashboard(folder / f'dashboard_{stem}.html', ctx, pics)
@@ -531,7 +537,7 @@ def partial_tail(values, group):
 
 
 def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list, status,
-                  xlsx_name, cid, no_compare):
+                  xlsx_name, cid, no_compare, goal_src=None):
     """Всё, что нужно панели: плитки, динамика текущего и прошлого периода, таблицы."""
     kpis = []
     for (mid, label, kind), v, pv in zip(mtot, cur or [], prev or []):
@@ -565,6 +571,7 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
         'warnings': warnings,
         'site': site, 'kpis': kpis, 'tables': tables, 'dynamics': dynamics,
         'goals': [(g.get('name'), reach) for g, reach in goal_list],
+        'goal_sources': goal_src or {},
         'period_text': f'{d1:%d.%m.%Y}–{d2:%d.%m.%Y}' + (
             '' if no_compare else f' · сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}') + f' · счётчик {cid}',
         'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
@@ -615,6 +622,75 @@ def goals_sheet(ws, cid, d1, d2, collect=None):
     ws.freeze_panes = 'A2'
     ws.auto_filter.ref = f'A1:E{ws.max_row}'
     return (title, len(results), len(results), sampled, None)
+
+
+def goal_sources_sheet(ws, cid, d1, d2, known=None, collect=None):
+    """Каждая цель по источникам трафика: сколько достижений дал источник, его
+    доля в цели и конверсия визитов из него в эту цель. Длинная таблица, а не
+    матрица: фильтр по колонке «Цель» показывает источники одной цели.
+
+    known — цели, уже полученные для листа «Цели» (иначе запрашиваются заново);
+    collect — сюда кладутся данные для тепловой карты на панели."""
+    title = ws.title
+    log(f'   {title}…')
+    try:
+        goals = ([g for g, _ in known] if known else
+                 api_get(f'/management/v1/counter/{cid}/goals').get('goals') or [])
+    except QueryError as e:
+        note_sheet(ws, f'Не получено: {e}')
+        return (title, 0, 0, None, str(e))
+    if not goals:
+        note_sheet(ws, 'Целей в счётчике нет.')
+        return (title, 0, 0, None, None)
+    visits, cells, total, sampled = {}, {}, {}, None   # источник → визиты; (цель, источник) → (достижения, конверсия)
+    for i in range(0, len(goals), GOALS_BY_SOURCE):
+        chunk = goals[i:i + GOALS_BY_SOURCE]
+        metrics = ['ym:s:visits'] + [f'ym:s:goal{g["id"]}{m}' for g in chunk for m in ('reaches', 'conversionRate')]
+        try:
+            rows, totals, s, _ = stat(cid, metrics, ['ym:s:lastsignTrafficSource'], d1.isoformat(), d2.isoformat(),
+                                      top=100, sort='-ym:s:visits')
+        except QueryError as e:
+            note_sheet(ws, f'Не получено: {e}')
+            return (title, 0, 0, None, str(e))
+        sampled = sampled or s
+        for j, g in enumerate(chunk):
+            total[g['id']] = (totals[1 + 2 * j] if totals else None) or 0
+        for dims, vals in rows:
+            src = dims[0] or '(не определено)'
+            visits[src] = vals[0]
+            for j, g in enumerate(chunk):
+                cells[(g['id'], src)] = (vals[1 + 2 * j], vals[2 + 2 * j])
+    goals.sort(key=lambda g: -total[g['id']])
+    sources = sorted(visits, key=lambda x: -(visits[x] or 0))
+
+    heads = ['Цель', 'Источник', 'Достижения', 'Доля в достижениях цели, %', 'Конверсия, %',
+             'Визиты источника', 'Номер цели']
+    ws.append(heads)
+    for c in ws[1]:
+        c.font, c.fill = HEAD_FONT, HEAD_FILL
+        c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+    ws.row_dimensions[1].height = 32
+    band = PatternFill('solid', fgColor='F5F6F8')      # каждая вторая цель — с подложкой
+    for n, g in enumerate(goals):
+        for src in sorted(sources, key=lambda x: (-((cells.get((g['id'], x)) or (0, 0))[0] or 0), -(visits[x] or 0))):
+            reach, conv = cells.get((g['id'], src)) or (None, None)
+            share = reach / total[g['id']] * 100 if reach is not None and total[g['id']] else None
+            ws.append([g.get('name'), src, cell_value(reach, 'int'), cell_value(share, 'pct'),
+                       cell_value(conv, 'pct'), cell_value(visits[src], 'int'), g['id']])
+            if n % 2:
+                for c in ws[ws.max_row]:
+                    c.fill = band
+    for row in ws.iter_rows(min_row=2, min_col=3, max_col=6):
+        for c, kind in zip(row, ('int', 'pct', 'pct', 'int')):
+            c.number_format = FORMATS[kind]
+    for col, w in zip('ABCDEFG', (44, 34, 13, 16, 13, 14, 12)):
+        ws.column_dimensions[col].width = w
+    ws.freeze_panes = 'C2'
+    ws.auto_filter.ref = f'A1:G{ws.max_row}'
+    if collect is not None:
+        collect.update(goals=[(g['id'], g.get('name'), total[g['id']]) for g in goals],
+                       sources=[(x, visits[x]) for x in sources], cells=cells)
+    return (title, ws.max_row - 1, ws.max_row - 1, sampled, None)
 
 
 def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, status, no_compare, group):

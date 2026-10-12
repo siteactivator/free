@@ -206,6 +206,57 @@ def _changes(plt, sns, kpis, out_dir):
     return _save(fig, out_dir, 'changes')
 
 
+# Источники в подписях тепловой карты — коротко, как в обиходе
+SOURCE_SHORT = {
+    'Переходы из поисковых систем': 'Поиск', 'Переходы по рекламе': 'Реклама', 'Прямые заходы': 'Прямые',
+    'Внутренние переходы': 'Внутренние', 'Переходы по ссылкам на сайтах': 'Ссылки',
+    'Переходы из социальных сетей': 'Соцсети', 'Переходы из рекомендательных систем': 'Рекомендации',
+    'Переходы с сохранённых страниц': 'Сохранённые', 'Переходы из мессенджеров': 'Мессенджеры',
+    'Переходы из почтовых систем': 'Почта',
+}
+WIDE = {'dynamics', 'goal_sources'}     # графики на всю ширину панели
+
+
+def _pct(v):
+    if not v:
+        return '0'
+    return '<0,1' if v < 0.1 else f'{v:.1f}'.replace('.', ',')
+
+
+def _goal_sources(plt, sns, gs, out_dir):
+    """Конверсия в каждую цель по источникам: строки — цели, столбцы — источники.
+
+    Цели разного масштаба: «3 страницы» — десятки процентов, звонок — доли
+    процента. Общая шкала залила бы мелкие цели одним бледным цветом, поэтому
+    цвет сравнивает источники внутри строки: темнее — где у этой цели конверсия
+    выше. Число в клетке — сама конверсия."""
+    import numpy as np
+    from matplotlib.colors import LinearSegmentedColormap
+    goals = [g for g in gs['goals'] if g[2]][:10]
+    sources = [s for s in gs['sources'] if (s[1] or 0) >= 100][:7]
+    if not goals or len(sources) < 2:
+        return None
+    conv = np.array([[((gs['cells'].get((gid, src)) or (None, None))[1] or 0) for src, _ in sources]
+                     for gid, _, _ in goals], dtype=float)
+    top = conv.max(axis=1, keepdims=True)
+    top[top == 0] = 1
+    labels = np.array([[_pct(v) for v in row] for row in conv])
+    note = ('Цвет сравнивает источники внутри каждой цели: темнее — там, где у этой цели конверсия выше. '
+            'Источники от 100 визитов; у цели — число достижений за период.')
+    fig, ax = _figure(plt, 11, 0.5 * len(goals) + 2.0, 'Конверсия в цели по источникам, %', note)
+    sns.heatmap(conv / top, annot=labels, fmt='', cbar=False, vmin=0, vmax=1, ax=ax,
+                cmap=LinearSegmentedColormap.from_list('accent', ['#eef4fc', ACCENT]),
+                linewidths=2, linecolor=SURFACE, annot_kws={'fontsize': 10})
+    ax.set_xticklabels([f'{SOURCE_SHORT.get(src, _short(src, 22))}\n{_num(v)} виз.' for src, v in sources],
+                       rotation=0, fontsize=9.5)
+    ax.set_yticklabels([f'{_short(name, 34)} · {_num(t)}' for _, name, t in goals], rotation=0)
+    ax.xaxis.tick_top()
+    ax.tick_params(length=0)
+    ax.set_xlabel('')
+    ax.set_ylabel('')
+    return _save(fig, out_dir, 'goal_sources')
+
+
 def build(ctx, out_dir):
     """Рисует графики по собранным данным. Возвращает [(заголовок, путь, подпись)]."""
     plt, sns = _setup()
@@ -271,8 +322,14 @@ def build(ctx, out_dir):
                   'Цели — топ-10 по достижениям', out_dir, 'goals')
         charts['goals'] = ('Цели', p, 'Достижения и конверсия каждой цели — лист «Цели»')
     # Порядок на панели: соседние графики в паре дополняют друг друга
+    gs = ctx.get('goal_sources')
+    if gs:
+        p = _goal_sources(plt, sns, gs, out_dir)
+        if p:
+            charts['goal_sources'] = ('Цели по источникам', p,
+                                      'Достижения и доля каждого источника в цели — лист «Цели по источникам»')
     order = ['dynamics', 'changes', 'sources', 'conversion', 'engines', 'devices',
-             'entry', 'phrases', 'cities', 'goals']
+             'entry', 'phrases', 'cities', 'goals', 'goal_sources']
     return [charts[k] for k in order if k in charts]
 
 
@@ -319,7 +376,7 @@ def excel_panel(wb, ctx, charts):
     # (строка Excel — 20 пикселей)
     layout, pair = [], []
     for ch in charts:
-        if Path(ch[1]).stem == 'dynamics':      # широкий график — один в ряду
+        if Path(ch[1]).stem in WIDE:            # широкий график — один в ряду
             if pair:
                 layout.append(pair)
                 pair = []
@@ -336,7 +393,7 @@ def excel_panel(wb, ctx, charts):
         tallest = 0
         for j, (_, path, _) in enumerate(line):
             img = Image(str(path))
-            width = 1220 if Path(path).stem == 'dynamics' else 600
+            width = 1220 if Path(path).stem in WIDE else 600
             scale = width / img.width
             img.width, img.height = int(img.width * scale), int(img.height * scale)
             ws.add_image(img, f'{"A" if j == 0 else "M"}{row}')
@@ -360,7 +417,7 @@ def html_dashboard(path, ctx, charts):
 
     tiles = ''.join(tile(label, shown, ch, unit) for label, _, shown, ch, unit in ctx['kpis'])
     cards = ''.join(
-        f'<figure class="card{" wide" if Path(p).stem == "dynamics" else ""}">'
+        f'<figure class="card{" wide" if Path(p).stem in WIDE else ""}">'
         f'<img src="data:image/png;base64,{_b64(p)}" alt="{title}"><figcaption>{cap}</figcaption></figure>'
         for title, p, cap in charts)
     sampled = ctx.get('sampled_note') or ''
