@@ -20,6 +20,51 @@ GRID = '#e1e0d9'
 BASELINE = '#c3c2b7'
 SURFACE = '#fcfcfb'
 
+# Шапка панели и страниц отчётов — как на sait-activator.ru: логотип (logo.png рядом со
+# скриптом) и две кнопки. Свои ссылки и подписи — здесь
+BRAND = {
+    'site': 'https://sait-activator.ru/',
+    'logo_alt': 'Сайт Активатор — агентство интернет-маркетинга',
+    'order': ('Заказать SEO и GEO-продвижение', 'https://sait-activator.ru/'),
+    'telegram': ('Подписаться на Telegram-канал', 'https://t.me/seo_python_2neuron'),
+}
+TG_ICON = ('<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" '
+           'd="M9.04 15.47 8.67 20.7c.53 0 .76-.23 1.04-.5l2.5-2.39 5.18 3.79c.95.52 1.62.25 1.88-.88l3.4-15.95'
+           'c.31-1.43-.52-1.99-1.45-1.64L1.2 10.9c-1.38.54-1.36 1.31-.24 1.66l5.1 1.59L17.9 6.7c.56-.37 1.07-.17.65.2'
+           'z"/></svg>')
+BRAND_CSS = """
+.brand{background:#fff;border-bottom:1px solid #e1e0d9}
+.brand-in{margin:0 auto;padding:14px 16px;display:flex;align-items:center;justify-content:space-between;gap:16px;
+  flex-wrap:wrap}
+.brand .logo img{height:46px;width:auto;display:block}
+.brand .logo b{font-size:22px;color:#001f34;letter-spacing:.5px}
+.cta{display:flex;gap:10px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 20px;border-radius:4px;
+  font:600 14.5px system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;white-space:nowrap}
+.btn:hover{text-decoration:none}
+.btn.order{background:#ff7729;color:#fff;border:1.5px solid #ff7729}
+.btn.order:hover{background:#f0651a;border-color:#f0651a}
+.btn.tg{background:#fff;color:#001f34;border:1.5px solid #5cc9fa} .btn.tg svg{color:#229ed9}
+.btn.tg:hover{background:#f1faff}
+@media (max-width:640px){.brand-in{justify-content:center}.cta{width:100%}.btn{flex:1 1 100%}}
+"""
+
+
+def brand_header(width=1100):
+    """Белая полоса с логотипом и кнопками; логотип встроен в страницу — интернет не нужен."""
+    import html as _html
+    logo_file = Path(__file__).resolve().parent / 'logo.png'
+    alt = _html.escape(BRAND['logo_alt'])
+    logo = (f'<img src="data:image/png;base64,{base64.b64encode(logo_file.read_bytes()).decode()}" alt="{alt}">'
+            if logo_file.is_file() else f'<b>{alt}</b>')
+    (order_text, order_url), (tg_text, tg_url) = BRAND['order'], BRAND['telegram']
+    return (f'<header class="brand"><div class="brand-in" style="max-width:{width}px">'
+            f'<a class="logo" href="{BRAND["site"]}" target="_blank" rel="noopener">{logo}</a>'
+            f'<div class="cta"><a class="btn tg" href="{tg_url}" target="_blank" rel="noopener">{TG_ICON}'
+            f'{_html.escape(tg_text)}</a><a class="btn order" href="{order_url}" target="_blank" rel="noopener">'
+            f'{_html.escape(order_text)}</a></div></div></header>')
+
+
 # Для каких показателей рост — это хорошо
 UP_IS_GOOD = {
     'Визиты': True, 'Посетители': True, 'Просмотры': True, 'Отказы, %': False,
@@ -353,8 +398,9 @@ def _money(v):
     return f'{_num(v)} ₽' if v is not None else ''
 
 
-def _split(plt, sns, labels, visits, conv, title, out_dir, name, width=6.4, note=None):
-    """Два графика друг под другом: визиты и отклонение конверсии от средней.
+def _split(plt, sns, labels, visits, conv, title, out_dir, name, width=6.4, note=None, cost=None, cpa=None):
+    """Графики друг под другом: визиты, расход и цена цели (если есть расходы) и
+    отклонение конверсии от средней.
 
     Конверсия везде близка (цели вовлечённости поднимают её до 80–90 %), и столбики
     от нуля разницы не покажут; отклонение в п.п. показывает, когда реклама работает
@@ -362,8 +408,10 @@ def _split(plt, sns, labels, visits, conv, title, out_dir, name, width=6.4, note
     total = sum(v or 0 for v in visits)
     avg = sum((c or 0) * (v or 0) for c, v in zip(conv, visits)) / total if total else 0
     dev = [(c - avg) if c is not None and v else 0 for c, v in zip(conv, visits)]
-    fig, (a1, a2) = plt.subplots(2, 1, figsize=(width, 4.8 + (0.3 if note else 0)), sharex=True,
-                                 layout='constrained')
+    money = bool(cost) and any(cost)
+    fig, axes = plt.subplots(4 if money else 2, 1, figsize=(width, (8.8 if money else 4.8) + (0.3 if note else 0)),
+                             sharex=True, layout='constrained')
+    a1, a2 = axes[0], axes[-1]
     fig.suptitle(title, x=0.01, ha='left', fontsize=13, fontweight='semibold', color=INK)
     if note:
         import textwrap
@@ -372,13 +420,28 @@ def _split(plt, sns, labels, visits, conv, title, out_dir, name, width=6.4, note
     a1.bar(x, [v or 0 for v in visits], color=ACCENT, width=0.7)
     a1.set_title('Визиты', loc='left', fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
     a1.yaxis.set_major_formatter(plt.FuncFormatter(_tick))
+    if money:
+        ac, aq = axes[1], axes[2]
+        ac.bar(x, [c or 0 for c in cost], color=ACCENT, width=0.7)
+        ac.set_title('Расход, ₽', loc='left', fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
+        ac.yaxis.set_major_formatter(plt.FuncFormatter(_tick))
+        # средняя цена цели — весь расход ÷ все достижения; дешевле неё — зелёным
+        reach = sum((c or 0) / q for c, q in zip(cost, cpa or []) if c and q)
+        avg_cpa = sum(c or 0 for c, q in zip(cost, cpa or []) if c and q) / reach if reach else 0
+        qs = [q or 0 for q in (cpa or [None] * len(x))]
+        aq.bar(x, qs, color=[MUTED if not q else GOOD if q <= avg_cpa else BAD for q in qs], width=0.7)
+        if avg_cpa:
+            aq.axhline(avg_cpa, color=INK_2, linewidth=1, linestyle=(0, (3, 3)))
+        aq.set_title(f'Цена цели, ₽: дешевле средней {_num(round(avg_cpa, 2))} ₽ — зелёным', loc='left',
+                     fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
+        aq.yaxis.set_major_formatter(plt.FuncFormatter(lambda v, _: _num(v)))
     a2.bar(x, dev, color=[GOOD if d > 0 else BAD for d in dev], width=0.7)
     a2.axhline(0, color=BASELINE, linewidth=1)
     a2.set_title(f'Конверсия: отклонение от средней {_num(round(avg, 1))}%, п.п.', loc='left', fontsize=10.5,
                  color=INK_2, pad=4, fontweight='normal')
     lim = max((abs(d) for d in dev), default=1) or 1
     a2.set_ylim(-lim * 1.25, lim * 1.25)
-    for ax in (a1, a2):
+    for ax in axes:
         ax.grid(axis='x', visible=False)
         sns.despine(ax=ax, left=True, bottom=True)
         ax.tick_params(length=0)
@@ -461,16 +524,24 @@ def build_direct(ctx, out_dir):
     # Время и аудитория: визиты и отклонение конверсии от средней
     def split(key, title, name, short=None, width=6.4, extra=()):
         parts = [k for k in (key, *extra) if t.get(k)]
-        labels, visits, conv = [], [], []
+        labels, visits, conv, cost, cpa = [], [], [], [], []
         for k in parts:
             _, mets, rows, _ = t[k]
-            ci = [m[1] for m in mets].index('Конверсия в любую цель, %')
+            names = [m[1] for m in mets]
+            if 'Конверсия в любую цель, %' not in names:
+                continue                     # лист только из расходов — визитов нет
+            ci = names.index('Конверсия в любую цель, %')
+            ri = names.index('Расход, ₽') if 'Расход, ₽' in names else None
+            qi = names.index('Цена цели, ₽') if 'Цена цели, ₽' in names else None
             for r in rows:
                 labels.append(short(r[0][0]) if short else str(r[0][0]))
                 visits.append(r[1][0])
                 conv.append(r[1][ci])
+                cost.append(r[1][ri] if ri is not None else None)
+                cpa.append(r[1][qi] if qi is not None else None)
         if len(labels) >= 2:
-            charts[name] = (title, _split(plt, sns, labels, visits, conv, title, out_dir, name, width=width),
+            charts[name] = (title, _split(plt, sns, labels, visits, conv, title, out_dir, name, width=width,
+                                          cost=cost, cpa=cpa),
                             ('Листы «' if len(parts) > 1 else 'Лист «') + '», «'.join(SHEETS.get(k, k) for k in parts) + '»')
 
     SHEETS = {'hours': 'Часы', 'weekdays': 'Дни недели', 'age': 'Возраст', 'gender': 'Пол',
@@ -490,6 +561,26 @@ def build_direct(ctx, out_dir):
              'Расход кампании, делённый на все достижения целей — лист «Кампании»', fmt=_money, reverse=True,
              note='Дешевле — выше. Цели вовлечённости тоже входят в достижения.')
     bars('placetype', 'Визиты', 'Поиск и сети: визиты', 'placetype', 'Лист «Поиск и сети»')
+    bars('placetype', 'Расход, ₽', 'Поиск и сети: расход, ₽', 'placetype_cost', 'Лист «Поиск и сети»', fmt=_money)
+    if t.get('cities'):
+        _, mets, rows, _ = t['cities']
+        names = [m[1] for m in mets]
+        if 'Расход, ₽' in names:
+            ri, qi = names.index('Расход, ₽'), names.index('Цена цели, ₽')
+            top = sorted((r for r in rows if r[1][ri]), key=lambda r: -r[1][ri])[:10]
+            if len(top) >= 2:
+                charts['cities_cost'] = ('Города в деньгах', _bars(
+                    plt, sns, [f'{r[0][0]} · цель {_money(r[1][qi])}' if r[1][qi] else str(r[0][0]) for r in top],
+                    [r[1][ri] for r in top], 'Города: расход, ₽ — топ-10', out_dir, 'cities_cost', fmt=_money,
+                    note='После точки — цена цели в городе.'), 'Лист «Города»')
+    if t.get('goal_cost'):
+        top = sorted(t['goal_cost'], key=lambda g: -g[1])[:12]
+        if top:
+            charts['goal_cost'] = ('Цена целей', _bars(
+                plt, sns, [f'{_short(n, 34)} · {_num(r)}' for n, r, _, _ in top], [c for _, _, c, _ in top],
+                'Цена цели, ₽ — по каждой цели', out_dir, 'goal_cost', fmt=_money,
+                note='Весь расход Директа за период, делённый на достижения цели (после точки). Цели '
+                     'вовлечённости дешёвые — смотрите на заявки, звонки и покупки.'), 'Лист «Цена целей»')
     bars('conditions', 'Визиты', 'Ключевые фразы — топ-12 по визитам', 'conditions', 'Лист «Ключевые фразы»', n=12)
     bars('queries', 'Визиты', 'Поисковые запросы — топ-12', 'queries', 'Что искали перед кликом — лист «Поисковые запросы»',
          n=12)
@@ -504,9 +595,9 @@ def build_direct(ctx, out_dir):
             charts['goal_campaigns'] = ('Цели по кампаниям', p,
                                         'Достижения, доля и цена цели по каждой кампании — лист «Цели по кампаниям'
                                         + ('»' if native else ' UTM»'))
-    order = ['dynamics', 'cost_dynamics', 'changes', 'campaigns', 'camp_conv', 'camp_cost', 'camp_cpa',
-             'goal_campaigns', 'autotarget', 'placetype', 'hours', 'weekdays', 'age', 'audience',
-             'entry', 'conditions', 'queries']
+    order = ['dynamics', 'cost_dynamics', 'changes', 'goal_cost', 'campaigns', 'camp_conv', 'camp_cost', 'camp_cpa',
+             'goal_campaigns', 'autotarget', 'placetype', 'placetype_cost', 'hours', 'weekdays', 'age', 'audience',
+             'cities_cost', 'entry', 'conditions', 'queries']
     return [charts[k] for k in order if k in charts]
 
 
@@ -795,7 +886,7 @@ h2.sec:first-child{{border-top:0;margin-top:22px;padding-top:0}}
 .switch.busy .sbar{{display:block}} .sst{{font-size:13px;color:var(--ink2)}}
 footer{{margin-top:24px;color:var(--muted);font-size:13px}}
 @media (max-width:600px){{.grid{{grid-template-columns:1fr}}}}
-</style></head><body><div class="wrap">
+{BRAND_CSS}</style></head><body>{brand_header(1240)}<div class="wrap">
 <header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><div class="periods">{periods}</div><p class="meta">{ctx['meta']}</p>{switch}{warn}</header>
 {body}
 <footer>Выгружено {ctx['exported']} через API Метрики. Все цифры — в Excel-файле рядом: {ctx['xlsx_name']}.{(' ' + sampled) if sampled else ''}</footer>

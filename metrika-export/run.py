@@ -870,7 +870,7 @@ DIRECT_REPORTS = {
                    'где показано объявление: поиск, сайты и приложения Рекламной сети'),
     'entry':      ('Страницы входа', 'ym:s:startURL', 'Страница входа', None, 'куда приводит реклама'),
     'devices':    ('Устройства', 'ym:s:deviceCategory', 'Устройство', None, 'ПК, смартфоны, планшеты'),
-    'cities':     ('Города', 'ym:s:regionCity', 'Город', None, 'города'),
+    'cities':     ('Города', 'ym:s:regionCity', 'Город', 'ym:ad:regionCity', 'города'),
     # Метки и аудитория — обычные группировки Метрики: работают, даже когда справочники
     # Директа недоступны (после сбоя 12.10.2026 кампании отвечали 503, а UTM — нет)
     'utm_campaign': ('Кампании по UTM', 'ym:s:lastsignUTMCampaign', 'utm_campaign', None,
@@ -879,17 +879,19 @@ DIRECT_REPORTS = {
                     'объявления по метке utm_content'),
     'utm_term':   ('Фразы по UTM', 'ym:s:lastsignUTMTerm', 'utm_term', None,
                    'ключевые фразы по метке utm_term; «---autotargeting» — автотаргетинг'),
-    'hours':      ('Часы', 'ym:s:hour', 'Час', None, 'по часам суток — для корректировок ставок по времени'),
-    'weekdays':   ('Дни недели', 'ym:s:dayOfWeek', 'День недели', None, 'по дням недели'),
-    'gender':     ('Пол', 'ym:s:gender', 'Пол', None, 'мужчины и женщины'),
-    'age':        ('Возраст', 'ym:s:ageInterval', 'Возраст', None, 'возрастные группы'),
+    # у часов, дней, пола, возраста и городов расходы есть и в ym:ad — деньги по сегментам;
+    # у устройств, новых/вернувшихся, UTM и страниц входа API расходов не отдаёт (ошибка 4001)
+    'hours':      ('Часы', 'ym:s:hour', 'Час', 'ym:ad:hour', 'по часам суток — для корректировок ставок по времени'),
+    'weekdays':   ('Дни недели', 'ym:s:dayOfWeek', 'День недели', 'ym:ad:dayOfWeek', 'по дням недели'),
+    'gender':     ('Пол', 'ym:s:gender', 'Пол', 'ym:ad:gender', 'мужчины и женщины'),
+    'age':        ('Возраст', 'ym:s:ageInterval', 'Возраст', 'ym:ad:ageInterval', 'возрастные группы'),
     'newold':     ('Новые и вернувшиеся', 'ym:s:isNewUser', 'Посетители', None,
                    'впервые на сайте или уже были'),
 }
 DIRECT_SPECIAL = {'dynamics': 'Динамика', 'goals': 'Цели по кампаниям', 'goals_utm': 'Цели по кампаниям UTM',
-                  'autotarget': 'Автотаргетинг и фразы'}
+                  'goal_cost': 'Цена целей', 'autotarget': 'Автотаргетинг и фразы'}
 DIRECT_ORDER = ['dynamics', 'campaigns', 'utm_campaign', 'placetype', 'ads', 'utm_content', 'conditions',
-                'queries', 'utm_term', 'autotarget', 'platforms', 'goals', 'goals_utm', 'hours', 'weekdays',
+                'queries', 'utm_term', 'autotarget', 'platforms', 'goals', 'goals_utm', 'goal_cost', 'hours', 'weekdays',
                 'gender', 'age', 'newold', 'entry', 'devices', 'cities']
 DIRECT_BY_DIM = {'hours', 'weekdays', 'age'}     # по порядку группировки, а не по числу визитов
 WITH_ID = {'Кампания', 'Объявление'}   # рядом с названием — номер из Директа
@@ -1051,6 +1053,30 @@ def cmd_direct(a):
                 wb.create_sheet(DIRECT_SPECIAL[key]), cid, d1, d2, None, goal_src_utm,
                 dim='ym:s:lastsignUTMCampaign', head='Кампания', extra=flt))
             continue
+        if key == 'goal_cost':
+            src = goal_src if goal_src.get('goals') else goal_src_utm
+            spent = cur[len(M_DIRECT) + 1] if len(mtot) > len(M_DIRECT) else None
+            if not (src.get('goals') and spent):
+                continue                     # нет расходов или целей — листа нет
+            title = DIRECT_SPECIAL[key]
+            log(f'   {title}…')
+            ws = wb.create_sheet(title)
+            rows = [(name, reach, spent / reach, gid) for gid, name, reach in src['goals'] if reach]
+            ws.append(['Цель', 'Достижения', 'Цена цели, ₽', 'Номер цели'])
+            for c in ws[1]:
+                c.font, c.fill = HEAD_FONT, HEAD_FILL
+                c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
+            for name, reach, cpa, gid in rows:
+                ws.append([name, cell_value(reach, 'int'), cell_value(cpa, 'money'), gid])
+                ws.cell(ws.max_row, 2).number_format = FORMATS['int']
+                ws.cell(ws.max_row, 3).number_format = FORMATS['money']
+            for col, w in zip('ABCD', (50, 14, 14, 14)):
+                ws.column_dimensions[col].width = w
+            ws.freeze_panes = 'B2'
+            ws.auto_filter.ref = f'A1:D{ws.max_row}'
+            status.append((title, len(rows), len(rows), None, None))
+            tables[key] = rows
+            continue
         if key == 'autotarget':
             title = DIRECT_SPECIAL[key]
             log(f'   {title}…')
@@ -1080,9 +1106,27 @@ def cmd_direct(a):
             rows, totals, sampled, total_rows = stat(cid, [m[0] for m in M_DIRECT], [dim], d1.isoformat(),
                                                      d2.isoformat(), top=a.top, sort=sort, extra=flt, ids=True)
         except QueryError as e:
-            note_sheet(ws, f'Не получено: {e}')
-            status.append((title, 0, 0, None, str(e)))
-            log(f'   ⚠ {title}: {e}')
+            costs = None
+            if logins and ad_dim:
+                try:
+                    costs, ct = ad_costs(cid, ad_dim, d1.isoformat(), d2.isoformat(), logins, top=max(a.top, 1000))
+                except QueryError:
+                    costs = None
+            if not costs:
+                note_sheet(ws, f'Не получено: {e}')
+                status.append((title, 0, 0, None, str(e)))
+                log(f'   ⚠ {title}: {e}')
+                continue
+            # только деньги: клики, расход, цена клика — визиты и цели Яндекс не отдал
+            rows = list(([k], [cl, co, co / cl if cl else None]) for (kind, k), (cl, co) in costs.items()
+                          if kind == 'name')
+            rows.sort(key=lambda r: -(r[1][1] or 0))
+            mets = M_COST[:3]
+            tot = [ct[0], ct[1], ct[1] / ct[0] if ct and ct[0] else None] if ct else None
+            write_table(ws, [head], mets, rows, tot)
+            status.append((title, len(rows), len(rows), None, None))
+            tables[key] = ([head], mets, rows, tot)
+            log(f'   ⚠ {title}: визиты не получены ({e}) — на листе только клики и расход')
             continue
         costs, ct = None, None
         if logins and ad_dim:

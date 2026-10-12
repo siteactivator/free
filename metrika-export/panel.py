@@ -14,7 +14,6 @@
 не больше двух отчётов: у API Метрики лимит три параллельных запроса, остальные
 ждут в очереди. Страница открывается только на этом компьютере (127.0.0.1).
 """
-import base64
 import html
 import json
 import os
@@ -38,19 +37,6 @@ KINDS = {
 BUTTONS = [('seo', 'Сформировать SEO-отчёт'), ('direct', 'Сформировать Директ')]
 PARALLEL = 2                 # отчётов одновременно
 DIRECT_CACHE_HOURS = 24      # как долго верить списку счётчиков с Директом
-
-# Шапка панели — как на sait-activator.ru: логотип (logo.png рядом со скриптом) и две кнопки.
-# Свои ссылки и подписи — здесь
-BRAND = {
-    'site': 'https://sait-activator.ru/',
-    'logo_alt': 'Сайт Активатор — агентство интернет-маркетинга',
-    'order': ('Заказать SEO и GEO-продвижение', 'https://sait-activator.ru/'),
-    'telegram': ('Подписаться на Telegram-канал', 'https://t.me/seo_python_2neuron'),
-}
-TG_ICON = ('<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true"><path fill="currentColor" '
-           'd="M9.04 15.47 8.67 20.7c.53 0 .76-.23 1.04-.5l2.5-2.39 5.18 3.79c.95.52 1.62.25 1.88-.88l3.4-15.95'
-           'c.31-1.43-.52-1.99-1.45-1.64L1.2 10.9c-1.38.54-1.36 1.31-.24 1.66l5.1 1.59L17.9 6.7c.56-.37 1.07-.17.65.2'
-           'z"/></svg>')
 
 CSS = """
 :root{--page:#f5f5f2;--surface:#fcfcfb;--ink:#0b0b0b;--ink2:#52514e;--muted:#898781;--line:#e1e0d9;
@@ -91,19 +77,6 @@ li>span{display:block;color:var(--muted);font-size:13.5px} .site{font-size:18px;
   white-space:nowrap} .act.err .st{color:var(--bad);white-space:normal}
 .done{font-size:13px} .hidden{display:none}
 @media (max-width:640px){.ctr{grid-template-columns:1fr}.acts{justify-content:flex-start}.act{width:100%}}
-.brand{background:#fff;border-bottom:1px solid var(--line)}
-.brand-in{max-width:1100px;margin:0 auto;padding:14px 16px;display:flex;align-items:center;
-  justify-content:space-between;gap:16px;flex-wrap:wrap}
-.brand .logo img{height:46px;width:auto;display:block}
-.brand .logo b{font-size:22px;color:#001f34;letter-spacing:.5px}
-.cta{display:flex;gap:10px;flex-wrap:wrap}
-.btn{display:inline-flex;align-items:center;justify-content:center;gap:8px;padding:11px 20px;border-radius:4px;
-  font:600 14.5px system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none;white-space:nowrap}
-.btn:hover{text-decoration:none}
-.btn.order{background:#ff7729;color:#fff;border:1.5px solid #ff7729} .btn.order:hover{background:#f0651a;border-color:#f0651a}
-.btn.tg{background:#fff;color:#001f34;border:1.5px solid #5cc9fa} .btn.tg svg{color:#229ed9}
-.btn.tg:hover{background:#f1faff}
-@media (max-width:640px){.brand-in{justify-content:center}.cta{width:100%}.btn{flex:1 1 100%}}
 """
 
 JS = """
@@ -296,21 +269,13 @@ def serve(a, core):
         return '<nav>' + ''.join(f'<a class="tab{" on" if k == on else ""}" href="{url}">{name}<i>{n}</i></a>'
                                  for k, url, name, n in items) + '</nav>'
 
-    logo_file = core.BASE / 'logo.png'
-    logo = (f'<img src="data:image/png;base64,{base64.b64encode(logo_file.read_bytes()).decode()}" '
-            f'alt="{html.escape(BRAND["logo_alt"])}">' if logo_file.is_file()
-            else f'<b>{html.escape(BRAND["logo_alt"])}</b>')
-    (order_text, order_url), (tg_text, tg_url) = BRAND['order'], BRAND['telegram']
-    header = (f'<header class="brand"><div class="brand-in">'
-              f'<a class="logo" href="{BRAND["site"]}" target="_blank" rel="noopener">{logo}</a>'
-              f'<div class="cta"><a class="btn tg" href="{tg_url}" target="_blank" rel="noopener">'
-              f'{TG_ICON}{html.escape(tg_text)}</a><a class="btn order" href="{order_url}" target="_blank" '
-              f'rel="noopener">{html.escape(order_text)}</a></div></div></header>')
+    header = core.charts.brand_header(1100)
 
     def page(title, body):
         return (f'<!doctype html><html lang="ru"><head><meta charset="utf-8">'
                 f'<meta name="viewport" content="width=device-width,initial-scale=1"><title>{title}</title>'
-                f'<style>{CSS}</style></head><body>{header}<div class="wrap">{body}</div></body></html>')
+                f'<style>{CSS}{core.charts.BRAND_CSS}</style></head><body>{header}<div class="wrap">{body}'
+                f'</div></body></html>')
 
     def home(refresh=False):
         try:
