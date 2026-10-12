@@ -37,6 +37,8 @@ except ImportError as e:
     sys.exit(f'Нет библиотеки ({e.name}). Выполните в этой папке:\n'
              '  python -m pip install -r requirements.txt')
 
+import charts  # noqa: E402  панель с графиками; seaborn подгружается только при сборке
+
 BASE = Path(__file__).resolve().parent
 ENV_PATH = BASE / '.env'
 DATA = BASE / 'data'
@@ -422,10 +424,17 @@ def cmd_report(a):
     log(f'   счётчик {cid} · {site} · {d1:%d.%m.%Y}–{d2:%d.%m.%Y} ({days} дн.) · '
         f'сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}')
 
+    want_charts = not a.no_charts
+    if want_charts and not charts.available():
+        log('   панель с графиками пропущена: нет seaborn — python -m pip install -r requirements.txt')
+        want_charts = False
+
     wb = Workbook()
     summary = wb.active
     summary.title = 'Сводка'
     status = []      # (лист, строк, всего строк, выборка, ошибка)
+    tables = {}      # данные листов — для панели с графиками
+    goal_list = []   # (цель, достижения)
 
     # Сводка: итоги периода и прошлого периода
     mtot = M_SESSION + M_GOALS
@@ -444,7 +453,7 @@ def cmd_report(a):
             sort = dim
         elif key == 'goals':
             title = SPECIAL[key]
-            status.append(goals_sheet(wb.create_sheet(title), cid, d1, d2))
+            status.append(goals_sheet(wb.create_sheet(title), cid, d1, d2, goal_list))
             continue
         else:
             title, dims, metrics, _ = REPORTS[key]
@@ -461,18 +470,109 @@ def cmd_report(a):
             continue
         write_table(ws, [h for _, h in dims], metrics, rows, totals)
         status.append((title, len(rows), total_rows, sampled, None))
+        tables[key] = ([h for _, h in dims], metrics, rows, totals)
 
     write_summary(summary, counter, d1, d2, p1, p2, mtot, cur, prev, s_cur, status, a.no_compare, group)
     folder = DATA / f'{cid}_{slug(site)}'
     folder.mkdir(parents=True, exist_ok=True)
-    out = folder / f'metrika_{slug(site)}_{d1.isoformat()}_{d2.isoformat()}.xlsx'
+    stem = f'{slug(site)}_{d1.isoformat()}_{d2.isoformat()}'
+    out = folder / f'metrika_{stem}.xlsx'
+
+    dashboard = None
+    if want_charts:
+        # Панель — дополнение: если она не соберётся, Excel всё равно сохранится
+        try:
+            log('   панель с графиками…')
+            ctx = panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list,
+                                status, out.name, cid, a.no_compare)
+            pics = charts.build(ctx, folder / f'charts_{d1.isoformat()}_{d2.isoformat()}')
+            charts.excel_panel(wb, ctx, pics)
+            dashboard = charts.html_dashboard(folder / f'dashboard_{stem}.html', ctx, pics)
+        except Exception as e:  # noqa: BLE001
+            log(f'   ⚠ панель с графиками не собрана: {type(e).__name__}: {e}')
+            if 'Панель' in wb.sheetnames:
+                del wb['Панель']
     wb.save(out)
     got = sum(1 for s in status if not s[4])
-    log(f'✅ листов: {got + 1} из {len(status) + 1}' + (f', не получено: {len(status) - got}' if got < len(status) else ''))
+    log(f'✅ листов: {got + 1} из {len(status) + 1}' + (f', не получено: {len(status) - got}' if got < len(status) else '')
+        + (' + Панель' if dashboard else ''))
     log(f'✅ файл: {out}')
+    if dashboard:
+        log(f'✅ панель в браузере: {dashboard}')
 
 
-def goals_sheet(ws, cid, d1, d2):
+def shown(v, kind):
+    """Значение для плитки панели: 36 720 / 31,5% / 1,40 / 0:50."""
+    if v is None:
+        return '—'
+    if kind == 'int':
+        return f'{v:,.0f}'.replace(',', ' ')
+    if kind == 'pct':
+        return f'{v:.1f}%'.replace('.', ',')
+    if kind == 'dur':
+        s = int(round(v))
+        return f'{s // 60}:{s % 60:02d}'
+    return f'{v:.2f}'.replace('.', ',')
+
+
+def partial_tail(values, group):
+    """1, если последняя точка динамики подозрительно мала — меньше трети медианы.
+
+    Так выглядит день, который Метрика ещё не досчитала (бывает при сбоях и
+    в первые часы после полуночи). Для недель и месяцев не проверяем: крайние
+    неполные по календарю, это нормально."""
+    if group != 'day' or len(values) < 8:
+        return 0
+    rest = sorted(values[:-1])
+    median = rest[len(rest) // 2]
+    return 1 if median and values[-1] < median / 3 else 0
+
+
+def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list, status,
+                  xlsx_name, cid, no_compare):
+    """Всё, что нужно панели: плитки, динамика текущего и прошлого периода, таблицы."""
+    kpis = []
+    for (mid, label, kind), v, pv in zip(mtot, cur or [], prev or []):
+        if kind == 'pct':
+            ch, unit = (round(v - pv, 1) if v is not None and pv is not None else None), 'pp'
+        else:
+            ch, unit = (round((v - pv) / pv * 100, 1) if v is not None and pv else None), 'pct'
+        kpis.append((label, v, shown(v, kind), ch, unit))
+    dynamics = None
+    if 'dynamics' in tables:
+        _, _, rows, _ = tables['dynamics']
+        dates = [datetime.strptime(r[0][0], '%Y-%m-%d').date() for r in rows]
+        dynamics = {'dates': dates, 'cur': [r[1][0] or 0 for r in rows], 'prev': None,
+                    'label': {'day': 'дням', 'week': 'неделям', 'month': 'месяцам'}[group]}
+        dynamics['partial_tail'] = partial_tail(dynamics['cur'], group)
+        if not no_compare:
+            dim = GROUPS[group][0]
+            try:
+                prev_rows, _, _, _ = stat(cid, ['ym:s:visits'], [dim], p1.isoformat(), p2.isoformat(), sort=dim)
+                dynamics['prev'] = [r[1][0] or 0 for r in prev_rows]
+            except QueryError as e:
+                log(f'   прошлый период для графика динамики не получен: {e}')
+    sampled = [s[0] for s in status if s[3]]
+    warnings = []
+    if dynamics and dynamics.get('partial_tail'):
+        last = dynamics['dates'][-1]
+        warnings.append(f'Данные за {last:%d.%m.%Y}, похоже, неполные: визитов в разы меньше обычного. '
+                        f'Метрика могла ещё не обработать этот день — перевыгрузите отчёт позже.')
+        log(f'   ⚠ {warnings[-1]}')
+    return {
+        'warnings': warnings,
+        'site': site, 'kpis': kpis, 'tables': tables, 'dynamics': dynamics,
+        'goals': [(g.get('name'), reach) for g, reach in goal_list],
+        'period_text': f'{d1:%d.%m.%Y}–{d2:%d.%m.%Y}' + (
+            '' if no_compare else f' · сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}') + f' · счётчик {cid}',
+        'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
+        'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
+        'xlsx_name': xlsx_name,
+        'sampled_note': ('По выборке: ' + ', '.join(sampled) + '.') if sampled else '',
+    }
+
+
+def goals_sheet(ws, cid, d1, d2, collect=None):
     title = ws.title
     log(f'   {title}…')
     try:
@@ -496,6 +596,8 @@ def goals_sheet(ws, cid, d1, d2):
         for j, g in enumerate(chunk):
             results.append((g, totals[2 * j] if totals else None, totals[2 * j + 1] if totals else None))
     results.sort(key=lambda x: -(x[1] or 0))
+    if collect is not None:
+        collect.extend((g, reach) for g, reach, _ in results)
     heads = ['Номер цели', 'Цель', 'Тип', 'Достижения', 'Конверсия, %']
     ws.append(heads)
     for c in ws[1]:
@@ -601,6 +703,7 @@ def main():
     r.add_argument('--group', choices=list(GROUPS), help='динамика по дням, неделям или месяцам (по умолчанию сам)')
     r.add_argument('--only', help=f'только эти листы через запятую: {",".join(ORDER)}')
     r.add_argument('--no-compare', action='store_true', help='без сравнения с прошлым периодом')
+    r.add_argument('--no-charts', action='store_true', help='без панели с графиками')
 
     w = sub.add_parser('raw', help='свой отчёт: любые метрики и группировки')
     w.add_argument('counter', help='номер счётчика или адрес сайта')
