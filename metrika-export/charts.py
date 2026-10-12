@@ -173,7 +173,8 @@ def _dynamics(plt, sns, dates, cur, prev, group_label, out_dir, partial_tail=0, 
     ax.grid(axis='x', visible=False)
     sns.despine(ax=ax, left=True)
     ax.tick_params(length=0)
-    ax.legend(loc='upper left', fontsize=9, ncol=2, labelcolor=INK_2)
+    # легенда — над графиком справа: внутри она ложится на линию, когда значения у верхнего края
+    ax.legend(loc='lower right', bbox_to_anchor=(1, 1.01), borderaxespad=0, fontsize=9.5, ncol=2, labelcolor=INK_2)
     return _save(fig, out_dir, name)
 
 
@@ -493,6 +494,23 @@ def build_seo(ctx, out_dir):
     return [charts[k] for k in order if k in charts]
 
 
+def _days(n):
+    """14 дней, 1 день, 2 дня."""
+    tail = 'дней' if 11 <= n % 100 <= 14 else {1: 'день', 2: 'дня', 3: 'дня', 4: 'дня'}.get(n % 10, 'дней')
+    return f'{n} {tail}'
+
+
+def _span(d1, d2):
+    """28.09 – 11.10.2026; год пишется один раз, если он общий."""
+    return (f'{d1:%d.%m} – {d2:%d.%m.%Y}' if d1.year == d2.year else f'{d1:%d.%m.%Y} – {d2:%d.%m.%Y}')
+
+
+def period_line(ctx):
+    """Строка периодов для Excel: «Период: 28.09 – 11.10.2026, 14 дней · сравнение: …»."""
+    parts = [f'{name}: {_span(d1, d2)}, {_days((d2 - d1).days + 1)}' for name, d1, d2 in ctx['periods']]
+    return ' · '.join(parts[:1] + [p[0].lower() + p[1:] for p in parts[1:]])
+
+
 def _b64(path):
     return base64.b64encode(Path(path).read_bytes()).decode()
 
@@ -506,8 +524,8 @@ def excel_panel(wb, ctx, charts):
     ws.sheet_view.showGridLines = False
     ws['A1'] = ctx.get('title') or f'Яндекс Метрика: {ctx["site"]}'
     ws['A1'].font = Font(bold=True, size=16)
-    ws['A2'] = ctx['period_text']
-    ws['A2'].font = Font(color='52514E')
+    ws['A2'] = period_line(ctx) + f' · {ctx["meta"]}'
+    ws['A2'].font = Font(bold=True, size=12)
     if ctx.get('warnings'):
         ws['A3'] = ' '.join(ctx['warnings'])
         ws['A3'].font = Font(color='8A5A00')
@@ -581,6 +599,9 @@ def html_dashboard(path, ctx, charts):
         f'<img src="data:image/png;base64,{_b64(p)}" alt="{title}"><figcaption>{cap}</figcaption></figure>'
         for title, p, cap in charts)
     sampled = ctx.get('sampled_note') or ''
+    periods = '<span class="vs">против</span>'.join(
+        f'<div class="period{" prev" if i else ""}"><span>{name}</span><b>{_span(d1, d2)}</b>'
+        f'<i>{_days((d2 - d1).days + 1)}</i></div>' for i, (name, d1, d2) in enumerate(ctx['periods']))
     warn = ''.join(f'<p class="warn">{w}</p>' for w in ctx.get('warnings', []))
     html = f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
@@ -592,6 +613,13 @@ body{{margin:0;background:var(--page);color:var(--ink);font:15px/1.5 system-ui,-
 .wrap{{max-width:1240px;margin:0 auto;padding:32px 24px 56px}}
 header h1{{font-size:26px;margin:0 0 4px;font-weight:600}}
 header p{{margin:0;color:var(--ink2)}}
+.periods{{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:14px 0 6px}}
+.period{{background:var(--surface);border:1px solid var(--line);border-left:4px solid #2a78d6;border-radius:10px;
+  padding:8px 14px;display:flex;align-items:baseline;gap:10px}}
+.period.prev{{border-left-color:#b9b8b1}}
+.period span{{font-size:13px;color:var(--ink2)}} .period b{{font-size:21px;font-weight:600}}
+.period i{{font-style:normal;font-size:15px;color:var(--ink2)}}
+.vs{{color:var(--muted);font-size:14px}} .meta{{font-size:13px;color:var(--muted)}}
 .tiles{{display:grid;grid-template-columns:repeat(auto-fit,minmax(170px,1fr));gap:12px;margin:24px 0}}
 .tile{{background:var(--surface);border:1px solid var(--line);border-radius:12px;padding:14px 16px}}
 .tile .label{{color:var(--ink2);font-size:13px}}
@@ -608,7 +636,7 @@ header p{{margin:0;color:var(--ink2)}}
 footer{{margin-top:24px;color:var(--muted);font-size:13px}}
 @media (max-width:600px){{.grid{{grid-template-columns:1fr}}}}
 </style></head><body><div class="wrap">
-<header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><p>{ctx['period_text']}</p>{warn}</header>
+<header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><div class="periods">{periods}</div><p class="meta">{ctx['meta']}</p>{warn}</header>
 <section class="tiles">{tiles}</section>
 <section class="grid">{cards}</section>
 <footer>Выгружено {ctx['exported']} через API Метрики. Все цифры — в Excel-файле рядом: {ctx['xlsx_name']}.{(' ' + sampled) if sampled else ''}</footer>

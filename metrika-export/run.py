@@ -44,7 +44,8 @@ import charts  # noqa: E402  панель с графиками; seaborn под�
 
 BASE = Path(__file__).resolve().parent
 ENV_PATH = BASE / '.env'
-DATA = BASE / 'data'
+# Папку с отчётами можно подменить: панель запускает отчёты в свою папку (--data)
+DATA = Path(os.environ['METRIKA_DATA']) if os.environ.get('METRIKA_DATA') else BASE / 'data'
 API = 'https://api-metrika.yandex.net'
 
 # Лимиты API: 30 запросов в секунду с IP, 3 параллельных, 5000 в сутки,
@@ -264,7 +265,7 @@ def all_counters():
             return out
 
 
-PERMISSION = {'own': 'свой', 'view': 'просмотр', 'edit': 'редактирование'}
+PERMISSION = {'own': 'свой', 'view': 'просмотр', 'edit': 'редактирование', 'analyst': 'аналитик'}
 
 
 def resolve_counter(arg):
@@ -575,8 +576,8 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
         'site': site, 'kpis': kpis, 'tables': tables, 'dynamics': dynamics,
         'goals': [(g.get('name'), reach) for g, reach in goal_list],
         'goal_sources': goal_src or {},
-        'period_text': f'{d1:%d.%m.%Y}–{d2:%d.%m.%Y}' + (
-            '' if no_compare else f' · сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}') + f' · счётчик {cid}',
+        'periods': [('Период', d1, d2)] + ([] if no_compare else [('Сравнение', p1, p2)]),
+        'meta': f'счётчик {cid}',
         'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
         'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
         'xlsx_name': xlsx_name,
@@ -1017,8 +1018,8 @@ def cmd_direct(a):
                                      'Глубина просмотра', 'Время на сайте', 'Посетители'])
             ctx = {'title': f'Яндекс Директ: {site}', 'site': site, 'tables': tables, 'costs': bool(logins),
                    'kpis': make_kpis(mtot, cur, prev, order), 'goal_sources': goal_src,
-                   'period_text': f'{d1:%d.%m.%Y}–{d2:%d.%m.%Y}' + (
-                       '' if a.no_compare else f' · сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}') + f' · счётчик {cid}',
+                   'periods': [('Период', d1, d2)] + ([] if a.no_compare else [('Сравнение', p1, p2)]),
+                   'meta': f'счётчик {cid} · только реклама в Директе',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': [cost_note] if cost_note else [],
                    'sampled_note': ('По выборке: ' + ', '.join(s[0] for s in status if s[3]) + '.')
@@ -1355,8 +1356,8 @@ def cmd_seo(a):
                    'kpis': make_kpis(mtot, cur, prev, ['Визиты', 'Посетители', 'Достижения целей',
                                                         'Конверсия в любую цель, %', 'Отказы, %', 'Глубина просмотра',
                                                         'Время на сайте', 'Новые посетители, %']),
-                   'period_text': f'{d1:%d.%m.%Y}–{d2:%d.%m.%Y} · год назад: {p1:%d.%m.%Y}–{p2:%d.%m.%Y} · '
-                                  f'счётчик {cid} · только переходы из поиска',
+                   'periods': [('Период', d1, d2), ('Год назад', p1, p2)],
+                   'meta': f'счётчик {cid} · только переходы из поиска · год назад — те же дни недели',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': 'к году назад',
                    'long_min': LONG_MIN_VISITS, 'long_click': LONG_CLICK,
@@ -1383,108 +1384,9 @@ PORT = 8790
 
 
 def cmd_panel(a):
-    """Страница со всеми выгруженными панелями: http://127.0.0.1:8790/ — Метрика,
-    http://127.0.0.1:8790/direct/ — Директ.
-
-    Открывается только на этом компьютере. Сервер просто отдаёт файлы из data/
-    и в API Метрики не ходит: новый отчёт — командой report, в списке он
-    появится после обновления страницы."""
-    import html
-    import webbrowser
-    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
-    from urllib.parse import quote
-
-    # Две страницы: / — отчёты Метрики, /direct/ — отчёты по Директу
-    PAGES = {'metrika': ('/', 'Метрика', 'Яндекс Метрика: панели', 'python run.py report …', 'report'),
-             'seo': ('/seo/', 'SEO', 'SEO: панели', 'python run.py seo …', 'seo'),
-             'direct': ('/direct/', 'Директ', 'Яндекс Директ: панели', 'python run.py direct …', 'direct')}
-    # префикс файла панели и Excel у каждого вида отчёта
-    PREFIX = {'metrika': ('dashboard_', 'metrika_'), 'seo': ('dashboard_seo_', 'seo_'),
-              'direct': ('dashboard_direct_', 'direct_')}
-
-    def kind_of(name):
-        return next((k for k in ('seo', 'direct') if name.startswith(PREFIX[k][0])), 'metrika')
-
-    def reports(kind):
-        found = [p for p in root.glob('*/dashboard_*.html') if kind_of(p.name) == kind]
-        return sorted(found, key=lambda f: f.stat().st_mtime, reverse=True)
-
-    def index(kind):
-        cards = []
-        for p in reports(kind):
-            cid, _, site = p.parent.name.partition('_')
-            m = re.search(r'_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.html$', p.name)
-            per = (f'{date.fromisoformat(m[1]):%d.%m.%Y}–{date.fromisoformat(m[2]):%d.%m.%Y}' if m else '')
-            made = datetime.fromtimestamp(p.stat().st_mtime).strftime('%d.%m.%Y %H:%M')
-            href = '/' + quote(f'{p.parent.name}/{p.name}')
-            head, xl = PREFIX[kind]
-            xlsx = p.with_name(xl + p.name[len(head):]).with_suffix('.xlsx')
-            excel = (f' · <a href="/{quote(f"{p.parent.name}/{xlsx.name}")}">Excel</a>' if xlsx.is_file() else '')
-            cards.append(f'<li><a class="site" href="{href}">{html.escape(site)}</a>'
-                         f'<span>{per} · счётчик {html.escape(cid)} · выгружено {made}{excel}</span></li>')
-        _, _, h1, cmd, verb = PAGES[kind]
-        tabs = ''.join(f'<a class="tab{" on" if k == kind else ""}" href="{url}">{name}'
-                       f'<i>{len(reports(k))}</i></a>' for k, (url, name, *_) in PAGES.items())
-        body = (f'<ul>{"".join(cards)}</ul>' if cards else
-                f'<p class="empty">Отчётов пока нет. Выгрузите первый: '
-                f'<code>python run.py {verb} &lt;номер счётчика или сайт&gt;</code> — и обновите страницу.</p>')
-        return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>{h1.replace('Яндекс ', '')}</title>
-<style>
-body{{margin:0;background:#f5f5f2;color:#0b0b0b;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}}
-.wrap{{max-width:900px;margin:0 auto;padding:24px 16px 56px}}
-nav{{display:flex;gap:6px;margin:0 0 20px}}
-.tab{{padding:6px 14px;border-radius:8px;color:#52514e;font-weight:600;border:1px solid #e1e0d9;background:#fcfcfb}}
-.tab i{{font-style:normal;font-weight:400;color:#898781;margin-left:6px}}
-.tab.on{{background:#2a78d6;border-color:#2a78d6;color:#fff}} .tab.on i{{color:#dbe8f9}}
-h1{{font-size:26px;font-weight:600;margin:0 0 4px}} .sub{{color:#52514e;margin:0 0 24px}}
-ul{{list-style:none;margin:0;padding:0;display:grid;gap:10px}}
-li{{background:#fcfcfb;border:1px solid #e1e0d9;border-radius:12px;padding:14px 16px}}
-li span{{display:block;color:#898781;font-size:13.5px}} a{{color:#2a78d6;text-decoration:none}}
-li a:hover{{text-decoration:underline}} .site{{font-size:18px;font-weight:600}}
-.empty{{background:#fcfcfb;border:1px solid #e1e0d9;border-radius:12px;padding:16px}}
-</style></head><body><div class="wrap"><nav>{tabs}</nav><h1>{h1}</h1>
-<p class="sub">Все выгруженные отчёты, свежие сверху. Новый отчёт: <code>{cmd}</code>
-— и обновите страницу.</p>{body}</div></body></html>"""
-
-    class Handler(SimpleHTTPRequestHandler):
-        def __init__(self, *args, **kw):
-            super().__init__(*args, directory=str(root), **kw)   # наружу из папки отчётов не отдаёт
-
-        def do_GET(self):
-            route = self.path.split('?')[0]
-            kind = {'/': 'metrika', '/index.html': 'metrika', '/seo': 'seo', '/seo/': 'seo',
-                    '/direct': 'direct', '/direct/': 'direct'}.get(route)
-            if kind:
-                page = index(kind).encode('utf-8')
-                self.send_response(200)
-                self.send_header('Content-Type', 'text/html; charset=utf-8')
-                self.send_header('Content-Length', str(len(page)))
-                self.end_headers()
-                self.wfile.write(page)
-            else:
-                super().do_GET()
-
-        def log_message(self, *args):            # без строки в терминале на каждый запрос
-            pass
-
-    root = Path(a.data).resolve() if a.data else DATA
-    root.mkdir(parents=True, exist_ok=True)
-    try:
-        srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
-    except OSError as e:
-        sys.exit(f'Порт {a.port} занят ({e}). Если панель уже запущена — откройте '
-                 f'http://127.0.0.1:{a.port}/, иначе укажите другой порт: --port {a.port + 1}')
-    url = f'http://127.0.0.1:{a.port}/'
-    log(f'✅ панели: {url}  (только на этом компьютере; остановить — Ctrl+C)')
-    log(f'   SEO: {url}seo/ · Директ: {url}direct/')
-    log(f'   отчёты из {root}')
-    if not a.no_browser:
-        webbrowser.open(url)
-    try:
-        srv.serve_forever()
-    except KeyboardInterrupt:
-        log('панель остановлена')
+    """Панель в браузере: счётчики с кнопками отчётов и готовые отчёты — panel.py."""
+    import panel
+    panel.serve(a, sys.modules[__name__])
 
 
 def main():
