@@ -18,7 +18,12 @@ python run.py report <номер или сайт> [--days 30 | --from ГГГГ-�
                      [--group day|week|month] [--only sources,phrases,...] [--top 10000] [--no-compare]
                      [--no-charts]
 python run.py raw <номер или сайт> --metrics ym:s:visits,... [--dimensions ...] [--sort -ym:s:visits]
+python run.py panel [--port 8790] [--data <папка с отчётами>] [--no-browser]   # http://127.0.0.1:8790/
 ```
+
+`panel` — локальный сервер на 127.0.0.1: список всех `dashboard_*.html` из `data\`
+и ссылки на Excel. В API не ходит, токен не нужен. Сервер живёт, пока открыт
+терминал: Claude запускает его в фоне и даёт владельцу адрес.
 
 - Токен — `METRIKA_TOKEN` в `.env` рядом с `run.py`. **Не печатать и не
   пересказывать его**; скрипт читает файл сам.

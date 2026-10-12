@@ -8,6 +8,7 @@
     python run.py report site.ru --days 90         счётчик можно назвать по сайту
     python run.py report 12345678 --from 2026-09-01 --to 2026-09-30
     python run.py raw 12345678 --metrics ym:s:visits --dimensions ym:s:lastsignTrafficSource
+    python run.py panel                            все панели в браузере: http://127.0.0.1:8790/
 
 Токен — в файле .env рядом со скриптом (METRIKA_TOKEN=...), как его получить —
 README.md. Результаты — в data/ рядом со скриптом.
@@ -499,6 +500,7 @@ def cmd_report(a):
     log(f'✅ файл: {out}')
     if dashboard:
         log(f'✅ панель в браузере: {dashboard}')
+        log(f'   все панели списком: python run.py panel → http://127.0.0.1:{PORT}/')
 
 
 def shown(v, kind):
@@ -686,6 +688,87 @@ def cmd_raw(a):
     log(f'✅ файл: {out}')
 
 
+# ─── панели в браузере ──────────────────────────────────────────────────────
+PORT = 8790
+
+
+def cmd_panel(a):
+    """Страница со всеми выгруженными панелями: http://127.0.0.1:8790/.
+
+    Открывается только на этом компьютере. Сервер просто отдаёт файлы из data/
+    и в API Метрики не ходит: новый отчёт — командой report, в списке он
+    появится после обновления страницы."""
+    import html
+    import webbrowser
+    from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
+    from urllib.parse import quote
+
+    def index():
+        cards = []
+        for p in sorted(root.glob('*/dashboard_*.html'), key=lambda f: f.stat().st_mtime, reverse=True):
+            cid, _, site = p.parent.name.partition('_')
+            m = re.search(r'_(\d{4}-\d{2}-\d{2})_(\d{4}-\d{2}-\d{2})\.html$', p.name)
+            per = (f'{date.fromisoformat(m[1]):%d.%m.%Y}–{date.fromisoformat(m[2]):%d.%m.%Y}' if m else '')
+            made = datetime.fromtimestamp(p.stat().st_mtime).strftime('%d.%m.%Y %H:%M')
+            href = quote(f'{p.parent.name}/{p.name}')
+            xlsx = p.with_name('metrika_' + p.name[len('dashboard_'):]).with_suffix('.xlsx')
+            excel = (f' · <a href="{quote(f"{p.parent.name}/{xlsx.name}")}">Excel</a>' if xlsx.is_file() else '')
+            cards.append(f'<li><a class="site" href="{href}">{html.escape(site)}</a>'
+                         f'<span>{per} · счётчик {html.escape(cid)} · выгружено {made}{excel}</span></li>')
+        body = (f'<ul>{"".join(cards)}</ul>' if cards else
+                '<p class="empty">Отчётов пока нет. Выгрузите первый: '
+                '<code>python run.py report &lt;номер счётчика или сайт&gt;</code> — и обновите страницу.</p>')
+        return f"""<!doctype html><html lang="ru"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Метрика: панели</title>
+<style>
+body{{margin:0;background:#f5f5f2;color:#0b0b0b;font:15px/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}}
+.wrap{{max-width:900px;margin:0 auto;padding:32px 16px 56px}}
+h1{{font-size:26px;font-weight:600;margin:0 0 4px}} .sub{{color:#52514e;margin:0 0 24px}}
+ul{{list-style:none;margin:0;padding:0;display:grid;gap:10px}}
+li{{background:#fcfcfb;border:1px solid #e1e0d9;border-radius:12px;padding:14px 16px}}
+li span{{display:block;color:#898781;font-size:13.5px}} a{{color:#2a78d6;text-decoration:none}}
+a:hover{{text-decoration:underline}} .site{{font-size:18px;font-weight:600}}
+.empty{{background:#fcfcfb;border:1px solid #e1e0d9;border-radius:12px;padding:16px}}
+</style></head><body><div class="wrap"><h1>Яндекс Метрика: панели</h1>
+<p class="sub">Все выгруженные отчёты, свежие сверху. Новый отчёт: <code>python run.py report …</code>
+— и обновите страницу.</p>{body}</div></body></html>"""
+
+    class Handler(SimpleHTTPRequestHandler):
+        def __init__(self, *args, **kw):
+            super().__init__(*args, directory=str(root), **kw)   # наружу из папки отчётов не отдаёт
+
+        def do_GET(self):
+            if self.path.split('?')[0] in ('/', '/index.html'):
+                page = index().encode('utf-8')
+                self.send_response(200)
+                self.send_header('Content-Type', 'text/html; charset=utf-8')
+                self.send_header('Content-Length', str(len(page)))
+                self.end_headers()
+                self.wfile.write(page)
+            else:
+                super().do_GET()
+
+        def log_message(self, *args):            # без строки в терминале на каждый запрос
+            pass
+
+    root = Path(a.data).resolve() if a.data else DATA
+    root.mkdir(parents=True, exist_ok=True)
+    try:
+        srv = ThreadingHTTPServer(('127.0.0.1', a.port), Handler)
+    except OSError as e:
+        sys.exit(f'Порт {a.port} занят ({e}). Если панель уже запущена — откройте '
+                 f'http://127.0.0.1:{a.port}/, иначе укажите другой порт: --port {a.port + 1}')
+    url = f'http://127.0.0.1:{a.port}/'
+    log(f'✅ панели: {url}  (только на этом компьютере; остановить — Ctrl+C)')
+    log(f'   отчёты из {root}')
+    if not a.no_browser:
+        webbrowser.open(url)
+    try:
+        srv.serve_forever()
+    except KeyboardInterrupt:
+        log('панель остановлена')
+
+
 def main():
     ap = argparse.ArgumentParser(description='Отчёты Яндекс Метрики в Excel через API')
     sub = ap.add_subparsers(dest='cmd', required=True)
@@ -712,11 +795,16 @@ def main():
     w.add_argument('--sort', help='сортировка, например -ym:s:visits')
     dates(w)
 
+    pn = sub.add_parser('panel', help=f'все панели в браузере: http://127.0.0.1:{PORT}/')
+    pn.add_argument('--port', type=int, default=PORT, help=f'порт, по умолчанию {PORT}')
+    pn.add_argument('--no-browser', action='store_true', help='не открывать браузер самому')
+    pn.add_argument('--data', help='папка с отчётами, по умолчанию data рядом со скриптом')
+
     a = ap.parse_args()
-    if a.cmd != 'counters' and a.days < 1:
+    if getattr(a, 'days', 1) < 1:
         sys.exit('--days должно быть больше нуля')
     try:
-        {'counters': cmd_counters, 'report': cmd_report, 'raw': cmd_raw}[a.cmd](a)
+        {'counters': cmd_counters, 'report': cmd_report, 'raw': cmd_raw, 'panel': cmd_panel}[a.cmd](a)
     except QueryError as e:
         sys.exit(f'Ошибка API Метрики: {e}')
 
