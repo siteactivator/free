@@ -134,6 +134,10 @@ YEAR = timedelta(days=364)   # «год назад» — ровно 52 неде�
 # Роботность «Только люди», как в интерфейсе Метрики: роботы — до 15–20 % визитов
 # и сильнее всего искажают отказы и время. --with-robots — считать всех
 HUMANS_ONLY = True
+# Главная цель (--goal): вместо «любой цели» достижения и конверсия везде считаются по
+# ней — и цена цели в сегментах тоже. Цели вовлечённости («3 страницы») иначе делают
+# конверсию 80–90 % и цену цели в рублях — бессмысленной
+FOCUS_GOAL = None        # (номер, название)
 
 
 def log(*a):
@@ -218,6 +222,10 @@ def stat(counter, metrics, dims, d1, d2, top=TOP, sort=None, extra=None, ids=Fal
     о выборке: None — данные полные, иначе доля выборки. extra — добавочные
     параметры запроса (filters, direct_client_logins); ids=True — значения
     группировок парами (название, id): номер кампании Директа и т. п."""
+    if FOCUS_GOAL and metrics and metrics[0].startswith('ym:s:'):
+        g = FOCUS_GOAL[0]
+        metrics = [f'ym:s:goal{g}reaches' if m == 'ym:s:sumGoalReachesAny' else
+                   f'ym:s:goal{g}conversionRate' if m == 'ym:s:anyGoalConversionRate' else m for m in metrics]
     accuracies = ['full'] * (1 + COMPLEX_RETRIES) + list(SAMPLED_FALLBACK)
     last = None
     for i, acc in enumerate(accuracies):
@@ -339,7 +347,7 @@ def dim_value(v, header):
 def write_table(ws, dim_headers, metrics, rows, totals):
     """Итоги — первой строкой, над шапкой: так они не попадают в автофильтр и не
     уезжают при сортировке."""
-    heads = dim_headers + [m[1] for m in metrics]
+    heads = dim_headers + [charts.lbl(m[1]) for m in metrics]
     if totals:
         ws.append(['Итого и в среднем'] + [None] * (len(dim_headers) - 1)
                   + [cell_value(v, m[2]) for v, m in zip(totals, metrics)])
@@ -432,6 +440,73 @@ def pick_periods(a, default='prev'):
     return d1, d2, p2 - (d2 - d1), p2, 'prev'
 
 
+# Порядок целей в выборе главной: заявки, покупки, звонки — первыми, вовлечённость — последней
+GOAL_FIRST = ['e_purchase', 'a_create_order', 'payment_system', 'form', 'contact_data_sent', 'contact_data',
+              'conditional_call', 'call', 'phone', 'messenger', 'email', 'a_begin_checkout', 'e_cart', 'button',
+              'action', 'file', 'social', 'search', 'site', 'offline', 'step', 'url', 'number', 'visit_duration']
+
+
+def goal_choices(cid):
+    """Цели счётчика для выбора главной: [(номер, название, тип по-русски)]."""
+    goals = api_get(f'/management/v1/counter/{cid}/goals').get('goals') or []
+    rank = {t: i for i, t in enumerate(GOAL_FIRST)}
+    goals.sort(key=lambda g: (rank.get(g.get('type'), len(rank) - 3), (g.get('name') or '').lower()))
+    return [(g['id'], g.get('name') or str(g['id']), GOAL_TYPES.get(g.get('type'), g.get('type') or ''))
+            for g in goals]
+
+
+def set_focus_goal(cid, arg, required=False):
+    """--goal: номер цели или часть названия. Возвращает (номер, название) или None.
+
+    required — для SEO и Директа: без главной цели конверсию и цену цели «делают» цели
+    вовлечённости, и цифры вводят в заблуждение. Целей в счётчике нет — отчёт и без неё."""
+    global FOCUS_GOAL
+    if not arg:
+        if required:
+            choices = goal_choices(cid)
+            if choices:
+                lines = '\n'.join(f'  {gid:>12}  {name} ({kind})' for gid, name, kind in choices[:60])
+                sys.exit('Выберите главную цель — по ней считаются конверсия и цена цели. Без неё цели\n'
+                         'вовлечённости («3 страницы», «время на сайте») искажают данные. Добавьте к команде\n'
+                         f'--goal <номер> (или часть названия). Цели счётчика, заявки и покупки — сверху:\n\n{lines}')
+        return None
+    goals = api_get(f'/management/v1/counter/{cid}/goals').get('goals') or []
+    hit = ([g for g in goals if str(g['id']) == str(arg)]
+           or [g for g in goals if str(arg).lower() in (g.get('name') or '').lower()])
+    if len(hit) != 1:
+        names = '\n'.join(f'  {g["id"]}  {g.get("name")}' for g in (hit or goals)[:40])
+        sys.exit(f'Цель «{arg}» ' + ('не найдена' if not hit else 'подходит не одна') +
+                 f'. Укажите номер:\n{names}')
+    FOCUS_GOAL = (hit[0]['id'], hit[0].get('name') or str(hit[0]['id']))
+    charts.RELABEL.update({'Достижения целей': 'Достижения цели', 'Конверсия в любую цель, %': 'Конверсия в цель, %'})
+    log(f'   главная цель: «{FOCUS_GOAL[1]}» (№ {FOCUS_GOAL[0]})')
+    return FOCUS_GOAL
+
+
+def goal_note():
+    return f' · главная цель: «{FOCUS_GOAL[1]}»' if FOCUS_GOAL else ''
+
+
+def goal_options(*sources):
+    """Цели для выбора на странице отчёта — из первого непустого списка, частые сверху."""
+    for src in sources:
+        if src and src.get('goals'):
+            return [(gid, name) for gid, name, _ in sorted(src['goals'], key=lambda g: -(g[2] or 0))]
+    return []
+
+
+def build_pages(path, ctx, pics):
+    """Страница отчёта и её PDF — если есть Chrome или Edge, они печатают страницу в PDF."""
+    ctx['pdf_name'] = path.with_suffix('.pdf').name if charts.find_browser() else None
+    page = charts.html_dashboard(path, ctx, pics)
+    if ctx['pdf_name']:
+        pdf = charts.html_to_pdf(page)
+        log(f'✅ PDF: {pdf}' if pdf else '   PDF не собран: браузер не напечатал страницу')
+    else:
+        log('   PDF не собран: для него нужен Chrome или Edge')
+    return page
+
+
 def humans_note():
     return ' · только люди, без роботов' if HUMANS_ONLY else ' · вместе с роботами'
 
@@ -521,6 +596,7 @@ def collect_traffic(wb, cid, d1, d2, p1, p2, group, only, top, no_compare):
 def cmd_report(a):
     counter = resolve_counter(a.counter)
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
+    set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a)
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else ORDER
@@ -560,7 +636,7 @@ def cmd_report(a):
                                 t['goal_list'], status, out.name, cid, a.no_compare, t['goal_src'], mode)
             pics = charts.build(ctx, folder / f'charts_{d1.isoformat()}_{d2.isoformat()}')
             charts.excel_panel(wb, ctx, pics)
-            dashboard = charts.html_dashboard(folder / f'dashboard_{stem}.html', ctx, pics)
+            dashboard = build_pages(folder / f'dashboard_{stem}.html', ctx, pics)
         except Exception as e:  # noqa: BLE001
             log(f'   ⚠ панель с графиками не собрана: {type(e).__name__}: {e}')
             if 'Панель' in wb.sheetnames:
@@ -634,7 +710,7 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
         'goals': [(g.get('name'), reach) for g, reach in goal_list],
         'goal_sources': goal_src or {},
         'periods': [('Период', d1, d2)] + ([] if no_compare else [(COMPARE[mode][0], p1, p2)]),
-        'meta': f'счётчик {cid}{humans_note()}', 'vs': COMPARE[mode][2],
+        'meta': f'счётчик {cid}{humans_note()}{goal_note()}', 'vs': COMPARE[mode][2],
         'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
         'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
         'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
@@ -801,7 +877,7 @@ def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, stat
                 change = round(v - pv, 1)
         elif v is not None and pv:
             change = round((v - pv) / pv * 100, 1)
-        ws.append([label, cell_value(v, kind), cell_value(pv, kind), change])
+        ws.append([charts.lbl(label), cell_value(v, kind), cell_value(pv, kind), change])
         r = ws.max_row
         ws.cell(r, 2).number_format = ws.cell(r, 3).number_format = FORMATS[kind]
         ws.cell(r, 4).number_format = fmt
@@ -989,6 +1065,7 @@ def make_kpis(mtot, cur, prev, order=None):
 def cmd_direct(a):
     counter = resolve_counter(a.counter)
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
+    set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a)
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else DIRECT_ORDER
@@ -1061,7 +1138,21 @@ def cmd_direct(a):
             title = DIRECT_SPECIAL[key]
             log(f'   {title}…')
             ws = wb.create_sheet(title)
-            rows = [(name, reach, spent / reach, gid) for gid, name, reach in src['goals'] if reach]
+            # достижения каждой цели — по всем визитам из Директа, а не из разбивки по кампаниям:
+            # в разбивку не попадают визиты без метки, и цена цели вышла бы завышенной
+            reach_of = {}
+            ids = [gid for gid, _, _ in src['goals']]
+            try:
+                for i in range(0, len(ids), 2 * GOALS_PER_REQUEST):
+                    part = ids[i:i + 2 * GOALS_PER_REQUEST]
+                    _, tot, _, _ = stat(cid, [f'ym:s:goal{g}reaches' for g in part], [], d1.isoformat(),
+                                        d2.isoformat(), top=1, extra=flt)
+                    reach_of.update(zip(part, tot or []))
+            except QueryError as e:
+                log(f'   ⚠ {title}: достижения целей не получены ({e}) — беру из разбивки по кампаниям')
+                reach_of = {gid: reach for gid, _, reach in src['goals']}
+            rows = [(name, reach_of.get(gid), spent / reach_of[gid], gid) for gid, name, _ in src['goals']
+                    if reach_of.get(gid)]
             ws.append(['Цель', 'Достижения', 'Цена цели, ₽', 'Номер цели'])
             for c in ws[1]:
                 c.font, c.fill = HEAD_FONT, HEAD_FILL
@@ -1191,8 +1282,11 @@ def cmd_direct(a):
                    'kpis': make_kpis(mtot, cur, prev, order), 'goal_sources': goal_src,
                    'goal_sources_utm': goal_src_utm,
                    'periods': [('Период', d1, d2)] + ([] if a.no_compare else [(COMPARE[mode][0], p1, p2)]),
-                   'meta': f'счётчик {cid} · только реклама в Директе{humans_note()}', 'vs': COMPARE[mode][2],
-                   'switch': {'cid': cid, 'kind': 'direct', 'mode': mode},
+                   'meta': f'счётчик {cid} · только реклама в Директе{humans_note()}{goal_note()}',
+                   'vs': COMPARE[mode][2],
+                   'switch': {'cid': cid, 'kind': 'direct', 'mode': mode,
+                              'goal': str(FOCUS_GOAL[0]) if FOCUS_GOAL else ''},
+                   'goal_options': goal_options(goal_src, goal_src_utm),
                    'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': [cost_note] if cost_note else [],
@@ -1219,7 +1313,7 @@ def cmd_direct(a):
                 ctx['dynamics'] = dyn
             pics = charts.build_direct(ctx, folder / f'charts_direct_{d1.isoformat()}_{d2.isoformat()}')
             charts.excel_panel(wb, ctx, pics)
-            dashboard = charts.html_dashboard(folder / f'dashboard_direct_{stem}.html', ctx, pics)
+            dashboard = build_pages(folder / f'dashboard_direct_{stem}.html', ctx, pics)
         except Exception as e:  # noqa: BLE001
             log(f'   ⚠ панель с графиками не собрана: {type(e).__name__}: {e}')
             if 'Панель' in wb.sheetnames:
@@ -1287,6 +1381,7 @@ def write_yoy(ws, heads, metrics, merged, cur_tot, prev_tot, prev_name='год �
     nd = len(heads)
     cols = list(heads)
     for _, h, _ in metrics:
+        h = charts.lbl(h)
         cols += [h, f'{h} — {prev_name}', f'{h} — изменение']
     if cur_tot:
         ws.append(['Итого и в среднем'] + [None] * (nd - 1) + line(cur_tot, prev_tot or [None] * len(metrics)))
@@ -1402,6 +1497,7 @@ def write_long(ws, rows, total, total_long):
 def cmd_seo(a):
     counter = resolve_counter(a.counter)
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
+    set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a, 'yoy')
     prev_name = COMPARE[mode][1]
     days = (d2 - d1).days + 1
@@ -1538,10 +1634,13 @@ def cmd_seo(a):
                                                         'Конверсия в любую цель, %', 'Отказы, %', 'Глубина просмотра',
                                                         'Время на сайте', 'Новые посетители, %']),
                    'periods': [('Период', d1, d2), (COMPARE[mode][0], p1, p2)],
-                   'meta': f'счётчик {cid}{humans_note()}' + (' · год назад — те же дни недели' if mode == 'yoy' else ''),
+                   'meta': f'счётчик {cid}{humans_note()}{goal_note()}'
+                           + (' · год назад — те же дни недели' if mode == 'yoy' else ''),
                    'prev_label': prev_name, 'cur_label': 'этот год' if mode == 'yoy' else 'сейчас',
                    'step': 'дням' if mode == 'mom' else 'неделям',
-                   'switch': {'cid': cid, 'kind': 'seo', 'mode': mode},
+                   'switch': {'cid': cid, 'kind': 'seo', 'mode': mode,
+                              'goal': str(FOCUS_GOAL[0]) if FOCUS_GOAL else ''},
+                   'goal_options': goal_options(goal_src),
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': COMPARE[mode][2],
                    'long_min': LONG_MIN_VISITS, 'long_click': LONG_CLICK,
@@ -1559,7 +1658,7 @@ def cmd_seo(a):
                     warnings.extend(tctx['warnings'])
                 pics = pics + tpics
             charts.excel_panel(wb, ctx, pics)
-            dashboard = charts.html_dashboard(folder / f'dashboard_seo_{stem}.html', ctx, pics)
+            dashboard = build_pages(folder / f'dashboard_seo_{stem}.html', ctx, pics)
         except Exception as e:  # noqa: BLE001
             log(f'   ⚠ панель с графиками не собрана: {type(e).__name__}: {e}')
             if 'Панель' in wb.sheetnames:
@@ -1597,6 +1696,8 @@ def main():
         p.add_argument('--compare', choices=['yoy', 'mom', 'qoq'],
                        help='сравнение: yoy — год к году, mom — месяц к месяцу, qoq — квартал к кварталу')
         p.add_argument('--with-robots', action='store_true', help='считать и роботов (по умолчанию — только люди)')
+        p.add_argument('--goal', help='главная цель: номер или часть названия — конверсия и цена цели по ней '
+                                      '(для seo и direct обязательна)')
 
     r = sub.add_parser('report', help='полный отчёт в Excel')
     r.add_argument('counter', help='номер счётчика или адрес сайта')

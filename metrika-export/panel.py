@@ -27,7 +27,7 @@ from collections import deque
 from datetime import date, datetime
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import quote, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 # вид: (вкладка, адрес, заголовок, префикс панели, префикс Excel, команда run.py)
 KINDS = {
@@ -76,15 +76,33 @@ li>span{display:block;color:var(--muted);font-size:13.5px} .site{font-size:18px;
 .st{display:block;font-size:12.5px;color:var(--ink2);min-height:18px;overflow:hidden;text-overflow:ellipsis;
   white-space:nowrap} .act.err .st{color:var(--bad);white-space:normal}
 .done{font-size:13px} .hidden{display:none}
+.who .goal{display:block;color:var(--ink2);font-size:13px;margin-top:2px}
+.who .goal b{color:var(--ink);font-weight:600}
+.picker{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:#eef4fc;
+  border:1px solid #c9dcf4;border-radius:10px;padding:10px 12px}
+.picker label{display:flex;gap:8px;align-items:center;font-weight:600;font-size:14px}
+.picker select{max-width:560px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;
+  font:14px system-ui,-apple-system,"Segoe UI",sans-serif}
+.picker .hint{color:var(--ink2);font-size:12.5px;flex:1 1 300px}
 @media (max-width:640px){.ctr{grid-template-columns:1fr}.acts{justify-content:flex-start}.act{width:100%}}
 """
 
 JS = """
 const POLL = 1500;
+const GOALS = {};      // счётчик → цели с сервера
 async function api(path, body) {
   const r = await fetch(path, body ? {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Panel': '1'},
                                       body: JSON.stringify(body)} : {});
   return r.json();
+}
+const esc = t => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
+// главная цель счётчика запоминается в браузере: выбрали один раз — дальше кнопка сразу строит отчёт
+function goalOf(cid) { try { return JSON.parse(localStorage.getItem('goal:' + cid) || 'null'); } catch (e) { return null; } }
+function remember(cid, g) { try { localStorage.setItem('goal:' + cid, JSON.stringify(g)); } catch (e) {} showGoal(cid); }
+function showGoal(cid) {
+  const li = document.getElementById('c' + cid), g = goalOf(cid);
+  if (li) li.querySelector('.goal').innerHTML =
+    g ? 'Главная цель: <b>' + esc(g[1]) + '</b> · <a href="#" class="chg">сменить</a>' : '';
 }
 function paint(el, job) {
   el.classList.remove('run', 'wait', 'err');
@@ -105,21 +123,54 @@ async function poll() {
   const jobs = await api('/api/jobs');
   let busy = false;
   document.querySelectorAll('.act').forEach(el => {
-    const job = jobs[el.dataset.cid + ':' + el.dataset.kind + ':'];
+    const g = goalOf(el.dataset.cid);
+    const job = jobs[[el.dataset.cid, el.dataset.kind, '', g ? g[0] : ''].join(':')];
     paint(el, job);
     if (job && (job.state === 'running' || job.state === 'queued')) busy = true;
   });
   clearTimeout(timer);
   if (busy) timer = setTimeout(poll, POLL);
 }
-document.addEventListener('click', async e => {
+async function start(el, goal) {
+  el.querySelector('button').disabled = true;
+  el.querySelector('.st').textContent = 'запуск…';
+  await api('/api/run', {cid: el.dataset.cid, kind: el.dataset.kind, goal: goal || ''});
+  poll();
+}
+// выбор главной цели: kind — какой отчёт запустить после выбора (null — только сменить цель)
+async function picker(li, kind) {
+  const cid = li.id.slice(1);
+  let box = li.querySelector('.picker');
+  if (!box) { li.insertAdjacentHTML('beforeend', '<div class="picker">Загружаю цели счётчика…</div>');
+              box = li.querySelector('.picker'); }
+  if (!GOALS[cid]) GOALS[cid] = await api('/api/goals?cid=' + cid);
+  const r = GOALS[cid], list = r.goals || [];
+  if (r.error) { box.textContent = 'Цели не получены: ' + r.error; delete GOALS[cid]; return; }
+  if (!list.length) {                         // целей в счётчике нет — отчёт без главной цели
+    box.remove();
+    if (kind) start(li.querySelector('.act[data-kind="' + kind + '"]'), '');
+    return;
+  }
+  box.innerHTML = '<label>Главная цель: <select><option value="">— выберите —</option>' +
+    list.map(g => '<option value="' + g[0] + '">' + esc(g[1]) + (g[2] ? ' · ' + esc(g[2]) : '') + '</option>').join('') +
+    '</select></label><span class="hint">По ней считаются конверсия и цена цели. Заявки, покупки и звонки — ' +
+    'сверху; цели вовлечённости («3 страницы», «время на сайте») искажают данные.</span>';
+  box.querySelector('select').addEventListener('change', ev => {
+    const g = list.find(x => String(x[0]) === ev.target.value);
+    if (!g) return;
+    remember(cid, [g[0], g[1]]);
+    box.remove();
+    if (kind) start(li.querySelector('.act[data-kind="' + kind + '"]'), g[0]);
+    poll();
+  });
+}
+document.addEventListener('click', e => {
+  const chg = e.target.closest('.chg');
+  if (chg) { e.preventDefault(); picker(chg.closest('.ctr'), null); return; }
   const btn = e.target.closest('.act button');
   if (!btn) return;
-  const el = btn.closest('.act');
-  btn.disabled = true;
-  el.querySelector('.st').textContent = 'запуск…';
-  await api('/api/run', {cid: el.dataset.cid, kind: el.dataset.kind});
-  poll();
+  const el = btn.closest('.act'), g = goalOf(el.dataset.cid);
+  if (g) start(el, g[0]); else picker(el.closest('.ctr'), el.dataset.kind);
 });
 const q = document.getElementById('q'), onlyDirect = document.getElementById('od');
 function filter() {
@@ -143,6 +194,7 @@ async function marks() {
   document.getElementById('dstate').textContent = r.ready ? '' : ' (проверяю, где подключён Директ…)';
   if (!r.ready) setTimeout(marks, 4000); else filter();
 }
+document.querySelectorAll('.ctr').forEach(li => showGoal(li.id.slice(1)));
 poll(); marks();
 """
 
@@ -215,7 +267,7 @@ def serve(a, core):
         return set(names) | {'панель с графиками'}
 
     def run_job(key):
-        cid, kind, mode = key
+        cid, kind, mode, goal = key
         job = jobs[key]
         with slots:
             job.update(state='running', status='запуск…', progress=0.02)
@@ -223,7 +275,7 @@ def serve(a, core):
             env = dict(os.environ, METRIKA_DATA=str(root), PYTHONIOENCODING='utf-8', PYTHONDONTWRITEBYTECODE='1')
             try:
                 cmd = [sys.executable, '-u', str(core.BASE / 'run.py'), KINDS[kind][5], cid]
-                p = subprocess.Popen(cmd + (['--compare', mode] if mode else []),
+                p = subprocess.Popen(cmd + (['--compare', mode] if mode else []) + (['--goal', goal] if goal else []),
                                      cwd=str(core.BASE), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding='utf-8', errors='replace',
                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -253,8 +305,8 @@ def serve(a, core):
             else:
                 job.update(state='error', error=' / '.join(list(tail)[-2:]) or f'код выхода {code}')
 
-    def start(cid, kind, mode=''):
-        key = (cid, kind, mode)
+    def start(cid, kind, mode='', goal=''):
+        key = (cid, kind, mode, goal)
         with lock:
             if key in jobs and jobs[key]['state'] in ('queued', 'running'):
                 return jobs[key]
@@ -300,7 +352,8 @@ def serve(a, core):
             info = ' · '.join(x for x in (html.escape(name), f'№ {cid}', access) if x)
             text = html.escape(f'{site} {name} {cid}'.lower())
             rows.append(f'<li class="ctr" id="c{cid}" data-text="{text}"><div class="who"><b>{html.escape(site)}</b>'
-                        f'<span>{info}</span></div><div class="acts">{"".join(acts)}</div></li>')
+                        f'<span>{info}</span><span class="goal"></span></div>'
+                        f'<div class="acts">{"".join(acts)}</div></li>')
         body = (tabs('home') + '<h1>Счётчики</h1>'
                 f'<p class="sub">Все счётчики, к которым есть доступ у токена: {len(items)}. Кнопка строит отчёт — '
                 f'готовый появится ссылкой рядом и на своей вкладке. SEO-отчёт — поиск и весь трафик, 4 полные '
@@ -322,6 +375,9 @@ def serve(a, core):
             made = datetime.fromtimestamp(p.stat().st_mtime).strftime('%d.%m.%Y %H:%M')
             xlsx = p.with_name(xl + p.name[len(head):]).with_suffix('.xlsx')
             excel = f' · <a href="/{quote(f"{p.parent.name}/{xlsx.name}")}">Excel</a>' if xlsx.is_file() else ''
+            pdf = p.with_suffix('.pdf')
+            if pdf.is_file():
+                excel += f' · <a href="/{quote(f"{p.parent.name}/{pdf.name}")}">PDF</a>'
             cards.append(f'<li><a class="site" href="{link(p)}">{html.escape(site)}</a>'
                          f'<span>{per} · счётчик {html.escape(cid)} · выгружено {made}{excel}</span></li>')
         body = (f'<ul>{"".join(cards)}</ul>' if cards else
@@ -354,9 +410,18 @@ def serve(a, core):
                     return self.send(listing(kind))
             if route == '/api/jobs':
                 with lock:
-                    out = {f'{c}:{k}:{m}': {x: v for x, v in j.items() if x in
-                                            ('state', 'progress', 'status', 'link', 'error')}
-                           for (c, k, m), j in jobs.items()}
+                    out = {f'{c}:{k}:{m}:{g}': {x: v for x, v in j.items() if x in
+                                                ('state', 'progress', 'status', 'link', 'error')}
+                           for (c, k, m, g), j in jobs.items()}
+                return self.send(json.dumps(out, ensure_ascii=False), 'application/json; charset=utf-8')
+            if route == '/api/goals':
+                cid = (parse_qs(u.query).get('cid') or [''])[0]
+                if not cid.isdigit():
+                    return self.send('{"error": "bad request"}', 'application/json', 400)
+                try:
+                    out = {'goals': core.goal_choices(cid)}
+                except BaseException as e:  # noqa: BLE001 — квота, сеть, токен: покажем на странице
+                    out = {'error': str(e)[:300]}
                 return self.send(json.dumps(out, ensure_ascii=False), 'application/json; charset=utf-8')
             if route == '/api/direct':
                 d = state['direct']
@@ -372,10 +437,11 @@ def serve(a, core):
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
                 cid, kind, mode = str(int(body['cid'])), body['kind'], body.get('mode') or ''
-                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq')
+                goal = str(body.get('goal') or '')
+                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq') and (goal == '' or goal.isdigit())
             except (ValueError, KeyError, AssertionError, TypeError):
                 return self.send('{"error": "bad request"}', 'application/json', 400)
-            job = start(cid, kind, mode)
+            job = start(cid, kind, mode, goal)
             return self.send(json.dumps({'state': job['state']}), 'application/json')
 
         def log_message(self, *args):            # без строки в терминале на каждый запрос

@@ -65,6 +65,14 @@ def brand_header(width=1100):
             f'{_html.escape(order_text)}</a></div></div></header>')
 
 
+# Подписи при выбранной главной цели: «Достижения целей» → «Достижения цели» и т. п.
+RELABEL = {}
+
+
+def lbl(label):
+    return RELABEL.get(label, label)
+
+
 # Для каких показателей рост — это хорошо
 UP_IS_GOOD = {
     'Визиты': True, 'Посетители': True, 'Просмотры': True, 'Отказы, %': False,
@@ -233,7 +241,7 @@ def _changes(plt, sns, kpis, out_dir, title='Что изменилось к пр
     if not rows:
         return None
     fig, ax = _figure(plt, 6.4, 0.44 * len(rows) + 1.55, title, note)
-    labels = [r[0] for r in rows]
+    labels = [lbl(r[0]) for r in rows]
     vals = [r[1] for r in rows]
     colors = []
     for label, ch, _ in rows:
@@ -693,6 +701,68 @@ def period_line(ctx):
     return ' · '.join(parts[:1] + [p[0].lower() + p[1:] for p in parts[1:]])
 
 
+def find_browser():
+    """Chrome или Edge — они печатают страницу отчёта в PDF. Нет ни того ни другого — None."""
+    import os
+    import shutil
+    for name in ('chrome', 'google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'msedge',
+                 'microsoft-edge'):
+        path = shutil.which(name)
+        if path:
+            return path
+    local = os.environ.get('LOCALAPPDATA', '')
+    for path in (r'C:\Program Files\Google\Chrome\Application\chrome.exe',
+                 r'C:\Program Files (x86)\Google\Chrome\Application\chrome.exe',
+                 local + r'\Google\Chrome\Application\chrome.exe',
+                 r'C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe',
+                 r'C:\Program Files\Microsoft\Edge\Application\msedge.exe',
+                 '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+                 '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge'):
+        if path and Path(path).is_file():
+            return path
+    return None
+
+
+def html_to_pdf(html_path):
+    """PDF страницы отчёта: без шапки с логотипом и кнопок, со ссылками в колонтитуле
+    (правила печати — PRINT_CSS). Печатает Chrome/Edge без окна, со своим временным профилем."""
+    import shutil
+    import subprocess
+    import tempfile
+    browser = find_browser()
+    if not browser:
+        return None
+    html_path = Path(html_path).resolve()
+    pdf = html_path.with_suffix('.pdf')
+    if pdf.exists():
+        pdf.unlink()                      # старый PDF не должен выдать себя за новый
+    profile = tempfile.mkdtemp(prefix='metrika-pdf-')
+    try:
+        subprocess.run([browser, '--headless=new', '--disable-gpu', '--no-first-run', f'--user-data-dir={profile}',
+                        '--no-pdf-header-footer', '--print-to-pdf-no-header', f'--print-to-pdf={pdf}',
+                        '--virtual-time-budget=5000', html_path.as_uri()],
+                       capture_output=True, timeout=180)
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    finally:
+        shutil.rmtree(profile, ignore_errors=True)
+    return pdf if pdf.is_file() and pdf.stat().st_size > 0 else None
+
+
+def print_css():
+    """Печать в PDF: A4, без шапки с логотипом и кнопок, ссылки — в колонтитуле каждой страницы."""
+    site = BRAND['site'].split('//')[-1].rstrip('/')
+    tg = BRAND['telegram'][1].split('//')[-1].rstrip('/')
+    foot = 'font:8.5pt system-ui,-apple-system,"Segoe UI",sans-serif;color:#6b6a65'
+    return ('@page{size:A4;margin:12mm 11mm 16mm;'
+            f'@bottom-left{{content:"{BRAND["logo_alt"]} · {site}";{foot}}}'
+            f'@bottom-right{{content:"Telegram-канал: {tg} · стр. " counter(page) " из " counter(pages);{foot}}}}}'
+            '@media print{.brand,.switch,.pdfbtn{display:none!important}body{background:#fff}'
+            '.wrap{max-width:none;padding:0}.grid{grid-template-columns:1fr}'
+            '.card,.tile,.periods,h2.sec{break-inside:avoid}h2.sec{break-after:avoid}'
+            '*{-webkit-print-color-adjust:exact;print-color-adjust:exact}}')
+
+
 def _b64(path):
     return base64.b64encode(Path(path).read_bytes()).decode()
 
@@ -769,16 +839,17 @@ SWITCH_JS = """
   const box = document.querySelector('.switch');
   if (!box) return;
   const st = box.querySelector('.sst'), bar = box.querySelector('.sbar i');
-  const buttons = box.querySelectorAll('button');
+  const buttons = box.querySelectorAll('button, select');
+  if (!box.dataset.cid) return;
   if (location.protocol === 'file:') {
     buttons.forEach(b => b.disabled = true);
     st.textContent = 'Пересчёт работает в панели: python run.py panel';
     return;
   }
-  const key = m => box.dataset.cid + ':' + box.dataset.kind + ':' + m;
-  async function poll(m) {
+  const key = (m, g) => [box.dataset.cid, box.dataset.kind, m, g].join(':');
+  async function poll(m, g) {
     const jobs = await (await fetch('/api/jobs')).json();
-    const j = jobs[key(m)];
+    const j = jobs[key(m, g)];
     if (j) {
       bar.style.width = Math.round((j.progress || 0) * 100) + '%';
       st.textContent = j.state === 'queued' ? 'в очереди…' : (j.status || '');
@@ -788,18 +859,25 @@ SWITCH_JS = """
         st.textContent = 'не получилось: ' + (j.error || ''); return;
       }
     }
-    setTimeout(() => poll(m), 1500);
+    setTimeout(() => poll(m, g), 1500);
   }
-  box.addEventListener('click', async e => {
-    const b = e.target.closest('button');
-    if (!b || box.classList.contains('busy')) return;
+  async function run(m, g) {
+    if (box.classList.contains('busy')) return;
     box.classList.add('busy');
-    buttons.forEach(x => { x.classList.toggle('on', x === b); x.disabled = true; });
+    buttons.forEach(x => x.disabled = true);
     st.textContent = 'пересчитываю…';
     await fetch('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Panel': '1'},
-                             body: JSON.stringify({cid: box.dataset.cid, kind: box.dataset.kind, mode: b.dataset.mode})});
-    poll(b.dataset.mode);
+                             body: JSON.stringify({cid: box.dataset.cid, kind: box.dataset.kind, mode: m, goal: g})});
+    poll(m, g);
+  }
+  box.addEventListener('click', e => {
+    const b = e.target.closest('button');
+    if (!b) return;
+    box.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    run(b.dataset.mode, box.dataset.goal);
   });
+  const sel = box.querySelector('select');
+  if (sel) sel.addEventListener('change', () => run(box.dataset.mode, sel.value));
 })();
 """
 
@@ -815,7 +893,7 @@ def html_dashboard(path, ctx, charts):
             cls = 'flat' if good is None or ch == 0 else ('up' if (ch > 0) == good else 'down')
             val = f'{ch:+.1f}'.replace('.', ',') + (' п.п.' if unit == 'pp' else '%')
             delta = f'<div class="delta {cls}">{arrow} {val} <span>{ctx.get("vs", "к прошлому периоду")}</span></div>'
-        return f'<div class="tile"><div class="label">{label}</div><div class="value">{shown}</div>{delta}</div>'
+        return f'<div class="tile"><div class="label">{lbl(label)}</div><div class="value">{shown}</div>{delta}</div>'
 
     def block(kpis, pics):
         tiles = ''.join(tile(label, shown, ch, unit) for label, _, shown, ch, unit in kpis)
@@ -829,14 +907,24 @@ def html_dashboard(path, ctx, charts):
     sections = ctx.get('sections')
     body = (''.join(f'<h2 class="sec">{name}</h2>{block(kpis, pics)}' for name, kpis, pics in sections)
             if sections else block(ctx['kpis'], charts))
+    import html as _html
+    from urllib.parse import quote
     sw = ctx.get('switch')
-    switch = ''
+    pdf = (f'<a class="pdfbtn" href="{quote(ctx["pdf_name"])}" download>Скачать PDF</a>'
+           if ctx.get('pdf_name') else '')
+    switch = f'<div class="switch">{pdf}</div>' if pdf else ''
     if sw:
         modes = [('yoy', 'Год к году'), ('mom', 'Месяц к месяцу'), ('qoq', 'Квартал к кварталу')]
-        switch = (f'<div class="switch" data-cid="{sw["cid"]}" data-kind="{sw["kind"]}"><span>Сравнить:</span>'
+        goal = str(sw.get('goal') or '')
+        opts = ''.join(f'<option value="{gid}"{" selected" if str(gid) == goal else ""}>'
+                       f'{_html.escape(_short(name, 60))}</option>' for gid, name in ctx.get('goal_options') or [])
+        pick = (f'<label class="goalsel">Главная цель: <select>{opts}'
+                f'</select></label>' if opts else '')
+        switch = (f'<div class="switch" data-cid="{sw["cid"]}" data-kind="{sw["kind"]}" '
+                  f'data-mode="{sw["mode"]}" data-goal="{goal}"><span>Сравнить:</span>'
                   + ''.join(f'<button data-mode="{m}"{" class=on" if m == sw["mode"] else ""}>{label}</button>'
                             for m, label in modes)
-                  + '<div class="sbar"><i></i></div><span class="sst"></span></div>')
+                  + pick + pdf + '<div class="sbar"><i></i></div><span class="sst"></span></div>')
     sampled = ctx.get('sampled_note') or ''
     periods = '<span class="vs">против</span>'.join(
         f'<div class="period{" prev" if i else ""}"><span>{name}</span><b>{_span(d1, d2)}</b>'
@@ -884,9 +972,15 @@ h2.sec:first-child{{border-top:0;margin-top:22px;padding-top:0}}
 .sbar{{width:180px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;display:none}}
 .sbar i{{display:block;height:100%;width:0;background:#2a78d6;transition:width .6s}}
 .switch.busy .sbar{{display:block}} .sst{{font-size:13px;color:var(--ink2)}}
+.goalsel{{display:inline-flex;align-items:center;gap:6px;color:var(--ink2);font-size:14px;margin-left:8px}}
+.goalsel select{{padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface);
+  font:14px system-ui,-apple-system,"Segoe UI",sans-serif;max-width:340px}}
+.pdfbtn{{margin-left:auto;padding:7px 14px;border-radius:8px;border:1px solid #2a78d6;color:#2a78d6;
+  font:600 14px system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none}}
+.pdfbtn:hover{{background:#eef4fc}}
 footer{{margin-top:24px;color:var(--muted);font-size:13px}}
 @media (max-width:600px){{.grid{{grid-template-columns:1fr}}}}
-{BRAND_CSS}</style></head><body>{brand_header(1240)}<div class="wrap">
+{BRAND_CSS}{print_css()}</style></head><body>{brand_header(1240)}<div class="wrap">
 <header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><div class="periods">{periods}</div><p class="meta">{ctx['meta']}</p>{switch}{warn}</header>
 {body}
 <footer>Выгружено {ctx['exported']} через API Метрики. Все цифры — в Excel-файле рядом: {ctx['xlsx_name']}.{(' ' + sampled) if sampled else ''}</footer>
