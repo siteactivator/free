@@ -220,7 +220,7 @@ SOURCE_SHORT = {
     'Переходы с сохранённых страниц': 'Сохранённые', 'Переходы из мессенджеров': 'Мессенджеры',
     'Переходы из почтовых систем': 'Почта',
 }
-WIDE = {'dynamics', 'goal_sources', 'cost_dynamics', 'goal_campaigns', 'weeks', 'goal_engines'}   # графики на всю ширину панели
+WIDE = {'dynamics', 'goal_sources', 'cost_dynamics', 'goal_campaigns', 'weeks', 'goal_engines', 'hours'}   # графики на всю ширину панели
 
 
 def _pct(v):
@@ -278,12 +278,14 @@ def build(ctx, out_dir):
     dyn = ctx.get('dynamics')
     if dyn and dyn['cur']:
         p = _dynamics(plt, sns, dyn['dates'], dyn['cur'], dyn.get('prev'), dyn['label'], out_dir,
-                      dyn.get('partial_tail', 0))
-        charts['dynamics'] = ('Динамика визитов', p, 'Прошлый период совмещён по порядку дней — лист «Динамика»')
+                      dyn.get('partial_tail', 0), prev_label=ctx.get('prev_label', 'прошлый период'),
+                      cur_label=ctx.get('cur_label', 'текущий период'))
+        charts['dynamics'] = ('Динамика визитов', p, f'Серым — {ctx.get("prev_label", "прошлый период")}, '
+                                                     f'по порядку дней — лист «Динамика»')
 
-    p = _changes(plt, sns, ctx['kpis'], out_dir)
+    p = _changes(plt, sns, ctx['kpis'], out_dir, title=f'Что изменилось {ctx.get("vs", "к прошлому периоду")}')
     if p:
-        charts['changes'] = ('Что изменилось', p, 'Сравнение с прошлым периодом такой же длины — лист «Сводка»')
+        charts['changes'] = ('Что изменилось', p, 'Лист «Сводка»')
 
     def rows_of(key, n, skip_undefined=False, min_visits=0, metric=0):
         if key not in t:
@@ -351,6 +353,40 @@ def _money(v):
     return f'{_num(v)} ₽' if v is not None else ''
 
 
+def _split(plt, sns, labels, visits, conv, title, out_dir, name, width=6.4, note=None):
+    """Два графика друг под другом: визиты и отклонение конверсии от средней.
+
+    Конверсия везде близка (цели вовлечённости поднимают её до 80–90 %), и столбики
+    от нуля разницы не покажут; отклонение в п.п. показывает, когда реклама работает
+    лучше среднего (зелёным) и хуже (красным). Средняя — с весом по визитам."""
+    total = sum(v or 0 for v in visits)
+    avg = sum((c or 0) * (v or 0) for c, v in zip(conv, visits)) / total if total else 0
+    dev = [(c - avg) if c is not None and v else 0 for c, v in zip(conv, visits)]
+    fig, (a1, a2) = plt.subplots(2, 1, figsize=(width, 4.8 + (0.3 if note else 0)), sharex=True,
+                                 layout='constrained')
+    fig.suptitle(title, x=0.01, ha='left', fontsize=13, fontweight='semibold', color=INK)
+    if note:
+        import textwrap
+        fig.supxlabel(textwrap.fill(note, int(width * 15)), x=0.01, ha='left', fontsize=8.5, color=MUTED)
+    x = list(range(len(labels)))
+    a1.bar(x, [v or 0 for v in visits], color=ACCENT, width=0.7)
+    a1.set_title('Визиты', loc='left', fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
+    a1.yaxis.set_major_formatter(plt.FuncFormatter(_tick))
+    a2.bar(x, dev, color=[GOOD if d > 0 else BAD for d in dev], width=0.7)
+    a2.axhline(0, color=BASELINE, linewidth=1)
+    a2.set_title(f'Конверсия: отклонение от средней {_num(round(avg, 1))}%, п.п.', loc='left', fontsize=10.5,
+                 color=INK_2, pad=4, fontweight='normal')
+    lim = max((abs(d) for d in dev), default=1) or 1
+    a2.set_ylim(-lim * 1.25, lim * 1.25)
+    for ax in (a1, a2):
+        ax.grid(axis='x', visible=False)
+        sns.despine(ax=ax, left=True, bottom=True)
+        ax.tick_params(length=0)
+    a2.set_xticks(x)
+    a2.set_xticklabels(labels, fontsize=9.5 if len(labels) > 12 else 10)
+    return _save(fig, out_dir, name)
+
+
 def build_direct(ctx, out_dir):
     """Графики отчёта по Директу. Возвращает [(заголовок, путь, подпись)]."""
     plt, sns = _setup()
@@ -362,7 +398,9 @@ def build_direct(ctx, out_dir):
     dyn = ctx.get('dynamics')
     if dyn and dyn['cur']:
         p = _dynamics(plt, sns, dyn['dates'], dyn['cur'], dyn.get('prev'), dyn['label'], out_dir,
-                      dyn.get('partial_tail', 0), title=f'Визиты из Директа по {dyn["label"]}')
+                      dyn.get('partial_tail', 0), title=f'Визиты из Директа по {dyn["label"]}',
+                      prev_label=ctx.get('prev_label', 'прошлый период'),
+                      cur_label=ctx.get('cur_label', 'текущий период'))
         charts['dynamics'] = ('Визиты из Директа', p, 'Прошлый период совмещён по порядку дней — лист «Динамика»')
         if dyn.get('cost') and any(dyn['cost']):
             p = _dynamics(plt, sns, dyn['dates'], dyn['cost'], None, dyn['label'], out_dir,
@@ -370,9 +408,9 @@ def build_direct(ctx, out_dir):
                           fmt=_money, cur_label='расход')
             charts['cost_dynamics'] = ('Расход', p, 'Расход — по данным Директа, лист «Динамика»')
 
-    p = _changes(plt, sns, ctx['kpis'], out_dir)
+    p = _changes(plt, sns, ctx['kpis'], out_dir, title=f'Что изменилось {ctx.get("vs", "к прошлому периоду")}')
     if p:
-        charts['changes'] = ('Что изменилось', p, 'Сравнение с прошлым периодом такой же длины — лист «Сводка»')
+        charts['changes'] = ('Что изменилось', p, 'Лист «Сводка»')
 
     def column(key, label):
         if key not in t:
@@ -395,9 +433,57 @@ def build_direct(ctx, out_dir):
                                          fmt=fmt, note=note), caption)
 
     pct = lambda v: f'{v:.1f}%'.replace('.', ',')  # noqa: E731
-    bars('campaigns', 'Визиты', 'Визиты по кампаниям', 'campaigns', 'Лист «Кампании»')
-    bars('campaigns', 'Конверсия в любую цель, %', 'Конверсия по кампаниям, %', 'camp_conv', 'Лист «Кампании»',
-         min_visits=30, fmt=pct, note='Кампании от 30 визитов.')
+    # Кампании — из Директа, а если Яндекс их не отдал — по метке utm_campaign
+    ck, csheet = ('campaigns', 'Кампании') if 'campaigns' in t else ('utm_campaign', 'Кампании по UTM')
+    ctitle = 'кампаниям' if ck == 'campaigns' else 'кампаниям (utm_campaign)'
+    bars(ck, 'Визиты', f'Визиты по {ctitle}', 'campaigns', f'Лист «{csheet}»')
+    bars(ck, 'Конверсия в любую цель, %', f'Конверсия по {ctitle}, %', 'camp_conv', f'Лист «{csheet}»',
+         min_visits=30, fmt=pct, note='Кампании от 30 визитов. Цели вовлечённости тоже входят в конверсию.')
+
+    # Автотаргетинг против ключевых фраз — по метке utm_term
+    if t.get('autotarget'):
+        _, mets, rows, _ = t['autotarget']
+        names = [m[1] for m in mets]
+        ci = names.index('Конверсия в любую цель, %')
+        # без метки utm_term — обычно в разы больше и забивает масштаб: только в подписи
+        untagged = sum(r[1][0] or 0 for r in rows if r[0][0] == 'Без метки utm_term')
+        sel = [(r[0][0], r[1][0], r[1][ci]) for r in rows if r[1][0] and r[0][0] != 'Без метки utm_term']
+        if sel:
+            labels = [f'{n} · {pct(c)}' if c is not None else n for n, _, c in sel]
+            charts['autotarget'] = ('Автотаргетинг и фразы', _bars(
+                plt, sns, labels, [v for _, v, _ in sel], 'Автотаргетинг и ключевые фразы: визиты', out_dir,
+                'autotarget', note='После точки — конверсия в любую цель. По метке utm_term: «---autotargeting» '
+                                   '— автотаргетинг, остальное — ключевые фразы.'
+                                   + (f' Ещё {_num(untagged)} визитов — без метки utm_term (кампании, где фраза '
+                                      f'в метку не подставляется).' if untagged else '')),
+                'Лист «Автотаргетинг и фразы»; сами фразы — «Фразы по UTM»')
+
+    # Время и аудитория: визиты и отклонение конверсии от средней
+    def split(key, title, name, short=None, width=6.4, extra=()):
+        parts = [k for k in (key, *extra) if t.get(k)]
+        labels, visits, conv = [], [], []
+        for k in parts:
+            _, mets, rows, _ = t[k]
+            ci = [m[1] for m in mets].index('Конверсия в любую цель, %')
+            for r in rows:
+                labels.append(short(r[0][0]) if short else str(r[0][0]))
+                visits.append(r[1][0])
+                conv.append(r[1][ci])
+        if len(labels) >= 2:
+            charts[name] = (title, _split(plt, sns, labels, visits, conv, title, out_dir, name, width=width),
+                            ('Листы «' if len(parts) > 1 else 'Лист «') + '», «'.join(SHEETS.get(k, k) for k in parts) + '»')
+
+    SHEETS = {'hours': 'Часы', 'weekdays': 'Дни недели', 'age': 'Возраст', 'gender': 'Пол',
+              'newold': 'Новые и вернувшиеся'}
+    days = {'Понедельник': 'Пн', 'Вторник': 'Вт', 'Среда': 'Ср', 'Четверг': 'Чт', 'Пятница': 'Пт',
+            'Суббота': 'Сб', 'Воскресенье': 'Вс'}
+    who = {'мужской': 'Мужчины', 'женский': 'Женщины', 'Новые посетители': 'Новые',
+           'Вернувшиеся посетители': 'Вернувшиеся'}
+    split('hours', 'Реклама по часам суток', 'hours', short=lambda h: str(h)[:2], width=11)
+    split('weekdays', 'Реклама по дням недели', 'weekdays', short=lambda d: days.get(d, d))
+    split('age', 'Возраст', 'age', short=lambda a: str(a).replace(' года', '').replace(' лет и старше', '+')
+          .replace('младше 18 лет', '<18'))
+    split('gender', 'Пол и новые посетители', 'audience', short=lambda g: who.get(g, g), extra=('newold',))
     if ctx.get('costs'):
         bars('campaigns', 'Расход, ₽', 'Расход по кампаниям, ₽', 'camp_cost', 'Лист «Кампании»', fmt=_money)
         bars('campaigns', 'Цена цели, ₽', 'Цена цели по кампаниям, ₽', 'camp_cpa',
@@ -409,38 +495,43 @@ def build_direct(ctx, out_dir):
          n=12)
     bars('entry', 'Визиты', 'Страницы входа из рекламы — топ-10', 'entry', 'Лист «Страницы входа»')
 
-    gs = ctx.get('goal_sources')
+    native = bool((ctx.get('goal_sources') or {}).get('goals'))
+    gs = ctx.get('goal_sources') if native else ctx.get('goal_sources_utm')
     if gs:
         p = _goal_sources(plt, sns, gs, out_dir, by='кампании', min_visits=30, name='goal_campaigns',
                           title='Конверсия в цели по кампаниям, %')
         if p:
             charts['goal_campaigns'] = ('Цели по кампаниям', p,
-                                        'Достижения, доля и цена цели по каждой кампании — лист «Цели по кампаниям»')
+                                        'Достижения, доля и цена цели по каждой кампании — лист «Цели по кампаниям'
+                                        + ('»' if native else ' UTM»'))
     order = ['dynamics', 'cost_dynamics', 'changes', 'campaigns', 'camp_conv', 'camp_cost', 'camp_cpa',
-             'placetype', 'entry', 'conditions', 'queries', 'goal_campaigns']
+             'goal_campaigns', 'autotarget', 'placetype', 'hours', 'weekdays', 'age', 'audience',
+             'entry', 'conditions', 'queries']
     return [charts[k] for k in order if k in charts]
 
 
 def build_seo(ctx, out_dir):
-    """Графики SEO-отчёта: поиск год к году, страницы, длинные клики, цели."""
+    """Графики SEO-отчёта: поиск к сравниваемому периоду, страницы, длинные клики, цели."""
     from datetime import date
     plt, sns = _setup()
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     charts = {}
     t = ctx['tables']
+    vs, prev, cur = ctx.get('vs', 'к году назад'), ctx.get('prev_label', 'год назад'), ctx.get('cur_label', 'этот год')
+    step = ctx.get('step', 'неделям')
 
     if t.get('weeks') and t['weeks'][0]:
         cw, pw = t['weeks']
         p = _dynamics(plt, sns, [date.fromisoformat(w[0]) for w in cw], [w[1] for w in cw],
-                      [w[1] for w in pw] or None, 'неделям', out_dir,
-                      title='Визиты из поиска по неделям: этот год и год назад', name='weeks',
-                      prev_label='год назад', cur_label='этот год')
-        charts['weeks'] = ('Поиск по неделям', p, 'Те же недели год назад — лист «Поиск по неделям»')
+                      [w[1] for w in pw] or None, step, out_dir,
+                      title=f'Визиты из поиска по {step}: {cur} и {prev}', name='weeks',
+                      prev_label=prev, cur_label=cur)
+        charts['weeks'] = ('Поиск в динамике', p, f'Серым — {prev}, по порядку {step} — лист «Поиск в динамике»')
 
-    p = _changes(plt, sns, ctx['kpis'], out_dir, title='Поиск: что изменилось за год')
+    p = _changes(plt, sns, ctx['kpis'], out_dir, title=f'Поиск: что изменилось {vs}')
     if p:
-        charts['changes'] = ('Что изменилось за год', p, 'Только визиты из поиска — лист «Сводка»')
+        charts['changes'] = ('Что изменилось', p, 'Только визиты из поиска — лист «Сводка»')
 
     if t.get('sources'):
         rows = []
@@ -449,10 +540,10 @@ def build_seo(ctx, out_dir):
                 continue
             rows.append((SOURCE_SHORT.get(d[0], _short(d[0] or '(не определено)', 30)), None, None,
                          round((v[0] - pv[0]) / pv[0] * 100, 1), 'pct'))
-        p = _changes(plt, sns, rows, out_dir, title='Визиты по источникам: изменение за год', name='sources_yoy',
-                     default_good=True, note='К тем же неделям год назад. Источники от 30 визитов.')
+        p = _changes(plt, sns, rows, out_dir, title=f'Визиты по источникам {vs}', name='sources_yoy',
+                     default_good=True, note=f'Сравнение: {prev}. Источники от 30 визитов.')
         if p:
-            charts['sources_yoy'] = ('Источники год к году', p, 'Лист «Источники год к году»')
+            charts['sources_yoy'] = ('Источники — сравнение', p, 'Лист «Источники — сравнение»')
 
     if t.get('entry'):
         mets, rows, was = t['entry']
@@ -467,9 +558,9 @@ def build_seo(ctx, out_dir):
         if len(lost) >= 2:
             charts['entry_lost'] = ('Страницы, потерявшие поиск', _bars(
                 plt, sns, [_short(x[0], site=ctx['site']) for x in lost], [x[1] for x in lost],
-                'Страницы, потерявшие визиты из поиска за год', out_dir, 'entry_lost', color=BAD,
-                fmt=lambda v: f'−{_num(v)}', note='Сколько визитов из поиска меньше, чем год назад.'),
-                'Визиты год назад и сейчас — лист «Страницы входа из поиска»')
+                f'Страницы, потерявшие визиты из поиска {vs}', out_dir, 'entry_lost', color=BAD,
+                fmt=lambda v: f'−{_num(v)}', note=f'На сколько визитов из поиска меньше, чем в периоде «{prev}».'),
+                f'Визиты сейчас и {prev} — лист «Страницы входа из поиска»')
 
     if t.get('long'):
         norm, least = ctx.get('long_norm', 10), ctx.get('long_min', 10)
@@ -580,6 +671,48 @@ def excel_panel(wb, ctx, charts):
     return ws
 
 
+# Переключатель периодов: пересчёт идёт через панель (python run.py panel) —
+# у файла, открытого двойным щелчком, сервера нет, и кнопки там выключены
+SWITCH_JS = """
+(function () {
+  const box = document.querySelector('.switch');
+  if (!box) return;
+  const st = box.querySelector('.sst'), bar = box.querySelector('.sbar i');
+  const buttons = box.querySelectorAll('button');
+  if (location.protocol === 'file:') {
+    buttons.forEach(b => b.disabled = true);
+    st.textContent = 'Пересчёт работает в панели: python run.py panel';
+    return;
+  }
+  const key = m => box.dataset.cid + ':' + box.dataset.kind + ':' + m;
+  async function poll(m) {
+    const jobs = await (await fetch('/api/jobs')).json();
+    const j = jobs[key(m)];
+    if (j) {
+      bar.style.width = Math.round((j.progress || 0) * 100) + '%';
+      st.textContent = j.state === 'queued' ? 'в очереди…' : (j.status || '');
+      if (j.state === 'done' && j.link) { st.textContent = 'готово, открываю…'; location.href = j.link; return; }
+      if (j.state === 'error') {
+        box.classList.remove('busy'); buttons.forEach(b => b.disabled = false);
+        st.textContent = 'не получилось: ' + (j.error || ''); return;
+      }
+    }
+    setTimeout(() => poll(m), 1500);
+  }
+  box.addEventListener('click', async e => {
+    const b = e.target.closest('button');
+    if (!b || box.classList.contains('busy')) return;
+    box.classList.add('busy');
+    buttons.forEach(x => { x.classList.toggle('on', x === b); x.disabled = true; });
+    st.textContent = 'пересчитываю…';
+    await fetch('/api/run', {method: 'POST', headers: {'Content-Type': 'application/json', 'X-Panel': '1'},
+                             body: JSON.stringify({cid: box.dataset.cid, kind: box.dataset.kind, mode: b.dataset.mode})});
+    poll(b.dataset.mode);
+  });
+})();
+"""
+
+
 def html_dashboard(path, ctx, charts):
     """Один самодостаточный HTML: картинки встроены, открывается двойным щелчком."""
     def tile(label, shown, ch, unit):
@@ -593,11 +726,26 @@ def html_dashboard(path, ctx, charts):
             delta = f'<div class="delta {cls}">{arrow} {val} <span>{ctx.get("vs", "к прошлому периоду")}</span></div>'
         return f'<div class="tile"><div class="label">{label}</div><div class="value">{shown}</div>{delta}</div>'
 
-    tiles = ''.join(tile(label, shown, ch, unit) for label, _, shown, ch, unit in ctx['kpis'])
-    cards = ''.join(
-        f'<figure class="card{" wide" if Path(p).stem in WIDE else ""}">'
-        f'<img src="data:image/png;base64,{_b64(p)}" alt="{title}"><figcaption>{cap}</figcaption></figure>'
-        for title, p, cap in charts)
+    def block(kpis, pics):
+        tiles = ''.join(tile(label, shown, ch, unit) for label, _, shown, ch, unit in kpis)
+        cards = ''.join(
+            f'<figure class="card{" wide" if Path(p).stem in WIDE else ""}">'
+            f'<img src="data:image/png;base64,{_b64(p)}" alt="{title}"><figcaption>{cap}</figcaption></figure>'
+            for title, p, cap in pics)
+        return f'<section class="tiles">{tiles}</section><section class="grid">{cards}</section>'
+
+    # SEO-отчёт — двумя разделами: «Поиск» и «Весь трафик»; остальные — одним
+    sections = ctx.get('sections')
+    body = (''.join(f'<h2 class="sec">{name}</h2>{block(kpis, pics)}' for name, kpis, pics in sections)
+            if sections else block(ctx['kpis'], charts))
+    sw = ctx.get('switch')
+    switch = ''
+    if sw:
+        modes = [('yoy', 'Год к году'), ('mom', 'Месяц к месяцу'), ('qoq', 'Квартал к кварталу')]
+        switch = (f'<div class="switch" data-cid="{sw["cid"]}" data-kind="{sw["kind"]}"><span>Сравнить:</span>'
+                  + ''.join(f'<button data-mode="{m}"{" class=on" if m == sw["mode"] else ""}>{label}</button>'
+                            for m, label in modes)
+                  + '<div class="sbar"><i></i></div><span class="sst"></span></div>')
     sampled = ctx.get('sampled_note') or ''
     periods = '<span class="vs">против</span>'.join(
         f'<div class="period{" prev" if i else ""}"><span>{name}</span><b>{_span(d1, d2)}</b>'
@@ -633,13 +781,24 @@ header p{{margin:0;color:var(--ink2)}}
 .card.wide{{grid-column:1/-1}}
 .card img{{width:100%;height:auto;display:block}}
 .card figcaption{{color:var(--muted);font-size:12.5px;padding:6px 4px 0}}
+h2.sec{{font-size:21px;font-weight:600;margin:34px 0 0;padding-top:18px;border-top:2px solid var(--line)}}
+h2.sec:first-child{{border-top:0;margin-top:22px;padding-top:0}}
+.switch{{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:14px 0 4px}}
+.switch>span{{color:var(--ink2);font-size:14px}}
+.switch button{{padding:7px 14px;border-radius:8px;border:1px solid var(--line);background:var(--surface);
+  color:var(--ink2);font:600 14px system-ui,-apple-system,"Segoe UI",sans-serif;cursor:pointer}}
+.switch button:hover{{border-color:#2a78d6;color:#2a78d6}}
+.switch button.on{{background:#2a78d6;border-color:#2a78d6;color:#fff}}
+.switch button:disabled{{cursor:default;opacity:.6}}
+.sbar{{width:180px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;display:none}}
+.sbar i{{display:block;height:100%;width:0;background:#2a78d6;transition:width .6s}}
+.switch.busy .sbar{{display:block}} .sst{{font-size:13px;color:var(--ink2)}}
 footer{{margin-top:24px;color:var(--muted);font-size:13px}}
 @media (max-width:600px){{.grid{{grid-template-columns:1fr}}}}
 </style></head><body><div class="wrap">
-<header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><div class="periods">{periods}</div><p class="meta">{ctx['meta']}</p>{warn}</header>
-<section class="tiles">{tiles}</section>
-<section class="grid">{cards}</section>
+<header><h1>{ctx.get('title') or 'Яндекс Метрика: ' + ctx['site']}</h1><div class="periods">{periods}</div><p class="meta">{ctx['meta']}</p>{switch}{warn}</header>
+{body}
 <footer>Выгружено {ctx['exported']} через API Метрики. Все цифры — в Excel-файле рядом: {ctx['xlsx_name']}.{(' ' + sampled) if sampled else ''}</footer>
-</div></body></html>"""
+</div>{'<script>' + SWITCH_JS + '</script>' if sw else ''}</body></html>"""
     Path(path).write_text(html, encoding='utf-8')
     return path

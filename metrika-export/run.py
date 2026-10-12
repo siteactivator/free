@@ -57,7 +57,7 @@ PAGE = 10000             # строк за запрос (API даёт до 100 0
 TOP = 10000              # строк на лист по умолчанию
 # «Запрос слишком сложный» (400) при перегрузке API: сначала повтор с паузой,
 # потом выборка — 50 %, затем 10 %. Лист с выборкой помечается в Сводке
-COMPLEX_RETRIES = 2
+COMPLEX_RETRIES = 3     # под перегрузкой Яндекс режет запрос через ~10 с; через полминуты тот же проходит
 SAMPLED_FALLBACK = ('0.5', '0.1')
 GOALS_PER_REQUEST = 10   # 2 метрики на цель; в одном запросе — до 20 метрик
 GOALS_BY_SOURCE = 9      # то же по источникам: визиты + 2 × 9 = 19 метрик
@@ -125,6 +125,15 @@ GOAL_TYPES = {
 }
 GROUPS = {'day': ('ym:s:date', 'День'), 'week': ('ym:s:startOfWeek', 'Неделя (с понедельника)'),
           'month': ('ym:s:startOfMonth', 'Месяц')}
+# С чем сравнивать: подпись блока на панели, «с чем» в тексте, «к чему» в плитках
+COMPARE = {'prev': ('Сравнение', 'прошлый период', 'к прошлому периоду'),
+           'yoy': ('Год назад', 'год назад', 'к году назад'),
+           'mom': ('Прошлый месяц', 'прошлый месяц', 'к прошлому месяцу'),
+           'qoq': ('Прошлый квартал', 'прошлый квартал', 'к прошлому кварталу')}
+YEAR = timedelta(days=364)   # «год назад» — ровно 52 недели: дни недели совпадают
+# Роботность «Только люди», как в интерфейсе Метрики: роботы — до 15–20 % визитов
+# и сильнее всего искажают отказы и время. --with-robots — считать всех
+HUMANS_ONLY = True
 
 
 def log(*a):
@@ -219,8 +228,8 @@ def stat(counter, metrics, dims, d1, d2, top=TOP, sort=None, extra=None, ids=Fal
             if i + 1 < len(accuracies):
                 nxt = accuracies[i + 1]
                 if nxt == 'full':
-                    log(f'   API перегружено («запрос слишком сложный»), повтор через {10 * (i + 1)} с…')
-                    time.sleep(10 * (i + 1))
+                    log(f'   API перегружено («запрос слишком сложный»), повтор через {15 * (i + 1)} с…')
+                    time.sleep(15 * (i + 1))
                 else:
                     log(f'   всё ещё «слишком сложный» — беру выборку {float(nxt):.0%}')
     raise QueryError(f'API не отдало отчёт даже по выборке 10 %: {last}')
@@ -237,6 +246,10 @@ def _stat_pages(counter, metrics, dims, d1, d2, top, sort, accuracy, extra=None,
         if sort:
             params['sort'] = sort
         params.update(extra or {})
+        ns = metrics[0].rsplit(':', 1)[0] if metrics else ''
+        if HUMANS_ONLY and ns in ('ym:s', 'ym:pv'):          # у расходов Директа (ym:ad) роботности нет
+            robot = f"{ns}:isRobot=='No'"
+            params['filters'] = f"{robot} AND ({params['filters']})" if params.get('filters') else robot
         j = api_get('/stat/v1/data', params)
         if totals is None:
             totals = j.get('totals') or []
@@ -383,8 +396,48 @@ def period(a):
     return d1, d2
 
 
+def pick_periods(a, default='prev'):
+    """Период и с чем сравнить: (начало, конец, начало сравнения, конец сравнения, режим).
+
+    prev — столько же дней прямо перед периодом; yoy — полные недели по прошлое
+    воскресенье против тех же недель год назад; mom, qoq — последний полный месяц
+    или квартал против предыдущего. С явными --from/--to: yoy — те же даты минус
+    52 недели, остальное — как prev."""
+    mode = getattr(a, 'compare', None) or default
+    today = date.today()
+    quarter = lambda d: date(d.year, 3 * ((d.month - 1) // 3) + 1, 1)   # noqa: E731 — начало квартала
+    if a.date_from or a.date_to:
+        d1, d2 = period(a)
+        if mode == 'yoy':
+            return d1, d2, d1 - YEAR, d2 - YEAR, mode
+        mode = 'prev'
+    elif mode == 'mom':
+        d2 = today.replace(day=1) - timedelta(days=1)
+        d1 = d2.replace(day=1)
+        p2 = d1 - timedelta(days=1)
+        return d1, d2, p2.replace(day=1), p2, mode
+    elif mode == 'qoq':
+        d2 = quarter(today) - timedelta(days=1)
+        d1 = quarter(d2)
+        p2 = d1 - timedelta(days=1)
+        return d1, d2, quarter(p2), p2, mode
+    elif mode == 'yoy':
+        d2 = today - timedelta(days=1)
+        d2 -= timedelta(days=(d2.weekday() + 1) % 7)            # последнее воскресенье
+        d1 = d2 - timedelta(days=7 * max(1, -(-a.days // 7)) - 1)
+        return d1, d2, d1 - YEAR, d2 - YEAR, mode
+    else:
+        d1, d2 = period(a)
+    p2 = d1 - timedelta(days=1)
+    return d1, d2, p2 - (d2 - d1), p2, 'prev'
+
+
+def humans_note():
+    return ' · только люди, без роботов' if HUMANS_ONLY else ' · вместе с роботами'
+
+
 def pick_group(a, d1, d2):
-    if a.group:
+    if getattr(a, 'group', None):
         return a.group
     days = (d2 - d1).days + 1
     return 'day' if days <= 62 else ('week' if days <= 370 else 'month')
@@ -419,43 +472,18 @@ def cmd_counters(a):
     log(f'\n✅ список сохранён: {out}')
 
 
-def cmd_report(a):
-    counter = resolve_counter(a.counter)
-    cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
-    d1, d2 = period(a)
-    days = (d2 - d1).days + 1
-    p2 = d1 - timedelta(days=1)
-    p1 = p2 - timedelta(days=days - 1)
-    only = [k.strip() for k in a.only.split(',')] if a.only else ORDER
-    bad = [k for k in only if k not in REPORTS and k not in SPECIAL]
-    if bad:
-        sys.exit(f'Неизвестные отчёты: {", ".join(bad)}. Доступны: {", ".join(ORDER)}')
-    group = pick_group(a, d1, d2)
-    log(f'   счётчик {cid} · {site} · {d1:%d.%m.%Y}–{d2:%d.%m.%Y} ({days} дн.) · '
-        f'сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}')
-
-    want_charts = not a.no_charts
-    if want_charts and not charts.available():
-        log('   панель с графиками пропущена: нет seaborn — python -m pip install -r requirements.txt')
-        want_charts = False
-
-    wb = Workbook()
-    summary = wb.active
-    summary.title = 'Сводка'
+def collect_traffic(wb, cid, d1, d2, p1, p2, group, only, top, no_compare):
+    """Листы обычного отчёта — весь трафик сайта — в книгу wb. Им пользуются и
+    отчёт report, и SEO-отчёт (раздел «Весь трафик»). Нет итогов — QueryError."""
     status = []      # (лист, строк, всего строк, выборка, ошибка)
     tables = {}      # данные листов — для панели с графиками
     goal_list = []   # (цель, достижения)
     goal_src = {}    # цели × источники — для тепловой карты
-
-    # Сводка: итоги периода и прошлого периода
     mtot = M_SESSION + M_GOALS
-    try:
-        _, cur, s_cur, _ = stat(cid, [m[0] for m in mtot], [], d1.isoformat(), d2.isoformat(), top=1)
-        prev = [None] * len(mtot)
-        if not a.no_compare:
-            _, prev, _, _ = stat(cid, [m[0] for m in mtot], [], p1.isoformat(), p2.isoformat(), top=1)
-    except QueryError as e:
-        sys.exit(f'Не удалось получить итоги: {e}')
+    _, cur, s_cur, _ = stat(cid, [m[0] for m in mtot], [], d1.isoformat(), d2.isoformat(), top=1)
+    prev = [None] * len(mtot)
+    if not no_compare:
+        _, prev, _, _ = stat(cid, [m[0] for m in mtot], [], p1.isoformat(), p2.isoformat(), top=1)
 
     for key in only:
         if key == 'dynamics':
@@ -477,7 +505,7 @@ def cmd_report(a):
         ws = wb.create_sheet(title)
         try:
             rows, totals, sampled, total_rows = stat(cid, [m[0] for m in metrics], [d for d, _ in dims],
-                                                     d1.isoformat(), d2.isoformat(), top=a.top, sort=sort)
+                                                     d1.isoformat(), d2.isoformat(), top=top, sort=sort)
         except QueryError as e:
             note_sheet(ws, f'Не получено: {e}')
             status.append((title, 0, 0, None, str(e)))
@@ -486,8 +514,38 @@ def cmd_report(a):
         write_table(ws, [h for _, h in dims], metrics, rows, totals)
         status.append((title, len(rows), total_rows, sampled, None))
         tables[key] = ([h for _, h in dims], metrics, rows, totals)
+    return {'status': status, 'tables': tables, 'goal_list': goal_list, 'goal_src': goal_src,
+            'mtot': mtot, 'cur': cur, 'prev': prev, 'sampled': s_cur}
 
-    write_summary(summary, counter, d1, d2, p1, p2, mtot, cur, prev, s_cur, status, a.no_compare, group)
+
+def cmd_report(a):
+    counter = resolve_counter(a.counter)
+    cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
+    d1, d2, p1, p2, mode = pick_periods(a)
+    days = (d2 - d1).days + 1
+    only = [k.strip() for k in a.only.split(',')] if a.only else ORDER
+    bad = [k for k in only if k not in REPORTS and k not in SPECIAL]
+    if bad:
+        sys.exit(f'Неизвестные отчёты: {", ".join(bad)}. Доступны: {", ".join(ORDER)}')
+    group = pick_group(a, d1, d2)
+    log(f'   счётчик {cid} · {site} · {d1:%d.%m.%Y}–{d2:%d.%m.%Y} ({days} дн.) · '
+        f'{COMPARE[mode][1]}: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}{humans_note()}')
+
+    want_charts = not a.no_charts
+    if want_charts and not charts.available():
+        log('   панель с графиками пропущена: нет seaborn — python -m pip install -r requirements.txt')
+        want_charts = False
+
+    wb = Workbook()
+    summary = wb.active
+    summary.title = 'Сводка'
+    try:
+        t = collect_traffic(wb, cid, d1, d2, p1, p2, group, only, a.top, a.no_compare)
+    except QueryError as e:
+        sys.exit(f'Не удалось получить итоги: {e}')
+    status = t['status']
+    write_summary(summary, counter, d1, d2, p1, p2, t['mtot'], t['cur'], t['prev'], t['sampled'], status,
+                  a.no_compare, group, prev_name=COMPARE[mode][1])
     folder = DATA / f'{cid}_{slug(site)}'
     folder.mkdir(parents=True, exist_ok=True)
     stem = f'{slug(site)}_{d1.isoformat()}_{d2.isoformat()}'
@@ -498,8 +556,8 @@ def cmd_report(a):
         # Панель — дополнение: если она не соберётся, Excel всё равно сохранится
         try:
             log('   панель с графиками…')
-            ctx = panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list,
-                                status, out.name, cid, a.no_compare, goal_src)
+            ctx = panel_context(counter, site, d1, d2, p1, p2, group, t['mtot'], t['cur'], t['prev'], t['tables'],
+                                t['goal_list'], status, out.name, cid, a.no_compare, t['goal_src'], mode)
             pics = charts.build(ctx, folder / f'charts_{d1.isoformat()}_{d2.isoformat()}')
             charts.excel_panel(wb, ctx, pics)
             dashboard = charts.html_dashboard(folder / f'dashboard_{stem}.html', ctx, pics)
@@ -514,7 +572,6 @@ def cmd_report(a):
     log(f'✅ файл: {out}')
     if dashboard:
         log(f'✅ панель в браузере: {dashboard}')
-        log(f'   все панели списком: python run.py panel → http://127.0.0.1:{PORT}/')
 
 
 def shown(v, kind):
@@ -547,7 +604,7 @@ def partial_tail(values, group):
 
 
 def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables, goal_list, status,
-                  xlsx_name, cid, no_compare, goal_src=None):
+                  xlsx_name, cid, no_compare, goal_src=None, mode='prev'):
     """Всё, что нужно панели: плитки, динамика текущего и прошлого периода, таблицы."""
     kpis = make_kpis(mtot, cur, prev)
     dynamics = None
@@ -576,8 +633,9 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
         'site': site, 'kpis': kpis, 'tables': tables, 'dynamics': dynamics,
         'goals': [(g.get('name'), reach) for g, reach in goal_list],
         'goal_sources': goal_src or {},
-        'periods': [('Период', d1, d2)] + ([] if no_compare else [('Сравнение', p1, p2)]),
-        'meta': f'счётчик {cid}',
+        'periods': [('Период', d1, d2)] + ([] if no_compare else [(COMPARE[mode][0], p1, p2)]),
+        'meta': f'счётчик {cid}{humans_note()}', 'vs': COMPARE[mode][2],
+        'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
         'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
         'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
         'xlsx_name': xlsx_name,
@@ -705,6 +763,15 @@ def goal_sources_sheet(ws, cid, d1, d2, known=None, collect=None, dim='ym:s:last
     return (title, ws.max_row - 1, ws.max_row - 1, sampled, None)
 
 
+def traffic_about(group):
+    """Что на каждом листе обычного отчёта — для списка листов в Сводке."""
+    about = {v[0]: v[3] for v in REPORTS.values()}
+    about.update({'Динамика': f'визиты и поведение по {"дням" if group == "day" else "неделям" if group == "week" else "месяцам"}',
+                  'Цели': 'достижения и конверсия каждой цели',
+                  'Цели по источникам': 'каждая цель по источникам трафика: достижения, доля, конверсия'})
+    return about
+
+
 def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, status, no_compare, group,
                   title=None, about=None, prev_name='прошлый период'):
     ws.column_dimensions['A'].width = 34
@@ -717,7 +784,7 @@ def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, stat
     ws['A2'] = f'Счётчик {counter["id"]}' + (f' · {counter["name"]}' if counter.get('name') else '')
     ws['A3'] = (f'Период: {d1:%d.%m.%Y}–{d2:%d.%m.%Y}'
                 + ('' if no_compare else f' · {prev_name}: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}'))
-    ws['A4'] = f'Выгружено {datetime.now():%d.%m.%Y %H:%M} через API Метрики' + (
+    ws['A4'] = f'Выгружено {datetime.now():%d.%m.%Y %H:%M} через API Метрики' + humans_note() + (
         f' · итоги по выборке {sampled:.0%}' if sampled else '')
     ws.append([])
     ws.append(['Показатель', 'Период', prev_name.capitalize(), 'Изменение'])
@@ -744,10 +811,7 @@ def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, stat
     for c in ws[hr][:5]:
         c.font, c.fill = HEAD_FONT, HEAD_FILL
     if about is None:
-        about = {v[0]: v[3] for v in REPORTS.values()}
-        about.update({'Динамика': f'визиты и поведение по {"дням" if group == "day" else "неделям" if group == "week" else "месяцам"}',
-                      'Цели': 'достижения и конверсия каждой цели',
-                      'Цели по источникам': 'каждая цель по источникам трафика: достижения, доля, конверсия'})
+        about = traffic_about(group)
     for title, n, total, s, err in status:
         state = f'не получено: {err}' if err else (f'выборка {s:.0%}' if s else 'полные')
         ws.append([title, n, total, state, about.get(title, '')])
@@ -807,11 +871,54 @@ DIRECT_REPORTS = {
     'entry':      ('Страницы входа', 'ym:s:startURL', 'Страница входа', None, 'куда приводит реклама'),
     'devices':    ('Устройства', 'ym:s:deviceCategory', 'Устройство', None, 'ПК, смартфоны, планшеты'),
     'cities':     ('Города', 'ym:s:regionCity', 'Город', None, 'города'),
+    # Метки и аудитория — обычные группировки Метрики: работают, даже когда справочники
+    # Директа недоступны (после сбоя 12.10.2026 кампании отвечали 503, а UTM — нет)
+    'utm_campaign': ('Кампании по UTM', 'ym:s:lastsignUTMCampaign', 'utm_campaign', None,
+                     'кампании по метке utm_campaign: имя или номер кампании, как его подставляет Директ'),
+    'utm_content': ('Объявления по UTM', 'ym:s:lastsignUTMContent', 'utm_content', None,
+                    'объявления по метке utm_content'),
+    'utm_term':   ('Фразы по UTM', 'ym:s:lastsignUTMTerm', 'utm_term', None,
+                   'ключевые фразы по метке utm_term; «---autotargeting» — автотаргетинг'),
+    'hours':      ('Часы', 'ym:s:hour', 'Час', None, 'по часам суток — для корректировок ставок по времени'),
+    'weekdays':   ('Дни недели', 'ym:s:dayOfWeek', 'День недели', None, 'по дням недели'),
+    'gender':     ('Пол', 'ym:s:gender', 'Пол', None, 'мужчины и женщины'),
+    'age':        ('Возраст', 'ym:s:ageInterval', 'Возраст', None, 'возрастные группы'),
+    'newold':     ('Новые и вернувшиеся', 'ym:s:isNewUser', 'Посетители', None,
+                   'впервые на сайте или уже были'),
 }
-DIRECT_SPECIAL = {'dynamics': 'Динамика', 'goals': 'Цели по кампаниям'}
-DIRECT_ORDER = ['dynamics', 'campaigns', 'placetype', 'ads', 'conditions', 'queries', 'platforms',
-                'goals', 'entry', 'devices', 'cities']
+DIRECT_SPECIAL = {'dynamics': 'Динамика', 'goals': 'Цели по кампаниям', 'goals_utm': 'Цели по кампаниям UTM',
+                  'autotarget': 'Автотаргетинг и фразы'}
+DIRECT_ORDER = ['dynamics', 'campaigns', 'utm_campaign', 'placetype', 'ads', 'utm_content', 'conditions',
+                'queries', 'utm_term', 'autotarget', 'platforms', 'goals', 'goals_utm', 'hours', 'weekdays',
+                'gender', 'age', 'newold', 'entry', 'devices', 'cities']
+DIRECT_BY_DIM = {'hours', 'weekdays', 'age'}     # по порядку группировки, а не по числу визитов
 WITH_ID = {'Кампания', 'Объявление'}   # рядом с названием — номер из Директа
+
+
+def autotarget_rows(rows, reach_i, total_visits):
+    """Строки utm_term → автотаргетинг, ключевые фразы и визиты без метки. Средние
+    (отказы, глубина, время, конверсия) пересчитываются с весом по визитам."""
+    groups = {'Автотаргетинг': [], 'Ключевые фразы': []}
+    for dims, vals in rows:
+        term = str(dims[0][0] if isinstance(dims[0], tuple) else dims[0] or '')
+        if term:
+            groups['Автотаргетинг' if 'autotarget' in term.lower() else 'Ключевые фразы'].append(vals)
+    out, tagged = [], 0
+    for name, items in groups.items():
+        v = sum(x[0] or 0 for x in items)
+        if not v:
+            continue
+        tagged += v
+        line = []
+        for i, (mid, _, kind) in enumerate(M_DIRECT):
+            if kind == 'int':
+                line.append(sum(x[i] or 0 for x in items))
+            else:
+                line.append(sum((x[i] or 0) * (x[0] or 0) for x in items) / v)
+        out.append(([name], line))
+    if total_visits and total_visits > tagged:
+        out.append((['Без метки utm_term'], [total_visits - tagged] + [None] * (len(M_DIRECT) - 1)))
+    return out
 
 
 def direct_logins(cid, given):
@@ -880,10 +987,8 @@ def make_kpis(mtot, cur, prev, order=None):
 def cmd_direct(a):
     counter = resolve_counter(a.counter)
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
-    d1, d2 = period(a)
+    d1, d2, p1, p2, mode = pick_periods(a)
     days = (d2 - d1).days + 1
-    p2 = d1 - timedelta(days=1)
-    p1 = p2 - timedelta(days=days - 1)
     only = [k.strip() for k in a.only.split(',')] if a.only else DIRECT_ORDER
     bad = [k for k in only if k not in DIRECT_REPORTS and k not in DIRECT_SPECIAL]
     if bad:
@@ -891,7 +996,7 @@ def cmd_direct(a):
     group = pick_group(a, d1, d2)
     flt = {'filters': DIRECT_FILTER}
     log(f'   Директ · счётчик {cid} · {site} · {d1:%d.%m.%Y}–{d2:%d.%m.%Y} ({days} дн.) · '
-        f'сравнение с {p1:%d.%m.%Y}–{p2:%d.%m.%Y}')
+        f'{COMPARE[mode][1]}: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}{humans_note()}')
 
     logins = direct_logins(cid, a.login)
     cost_note = '' if logins else (
@@ -907,7 +1012,7 @@ def cmd_direct(a):
     wb = Workbook()
     summary = wb.active
     summary.title = 'Сводка'
-    status, tables, goal_src, camp_cost = [], {}, {}, {}
+    status, tables, goal_src, camp_cost, goal_src_utm = [], {}, {}, {}, {}
     reach_i = [m[0] for m in M_DIRECT].index('ym:s:sumGoalReachesAny')
 
     mtot = list(M_DIRECT)
@@ -941,12 +1046,34 @@ def cmd_direct(a):
                 wb.create_sheet(DIRECT_SPECIAL[key]), cid, d1, d2, None, goal_src,
                 dim='ym:s:lastsignDirectClickOrder', head='Кампания', extra=flt, cost=camp_cost or None))
             continue
+        if key == 'goals_utm':
+            status.append(goal_sources_sheet(
+                wb.create_sheet(DIRECT_SPECIAL[key]), cid, d1, d2, None, goal_src_utm,
+                dim='ym:s:lastsignUTMCampaign', head='Кампания', extra=flt))
+            continue
+        if key == 'autotarget':
+            title = DIRECT_SPECIAL[key]
+            log(f'   {title}…')
+            ws = wb.create_sheet(title)
+            try:
+                rows = (tables['utm_term'][2] if 'utm_term' in tables else
+                        stat(cid, [m[0] for m in M_DIRECT], ['ym:s:lastsignUTMTerm'], d1.isoformat(), d2.isoformat(),
+                             top=a.top, sort='-ym:s:visits', extra=flt)[0])
+            except QueryError as e:
+                note_sheet(ws, f'Не получено: {e}')
+                status.append((title, 0, 0, None, str(e)))
+                continue
+            out = autotarget_rows(rows, reach_i, cur[0])
+            write_table(ws, ['Тип показа'], M_DIRECT, out, None)
+            status.append((title, len(out), len(out), None, None))
+            tables[key] = (['Тип показа'], M_DIRECT, out, None)
+            continue
         if key == 'dynamics':
             dim, head = GROUPS[group]
             title, ad_dim, sort = DIRECT_SPECIAL[key], 'ym:ad:date', dim
         else:
             title, dim, head, ad_dim, _ = DIRECT_REPORTS[key]
-            sort = '-ym:s:visits'
+            sort = dim if key in DIRECT_BY_DIM else '-ym:s:visits'
         log(f'   {title}…')
         ws = wb.create_sheet(title)
         try:
@@ -997,7 +1124,7 @@ def cmd_direct(a):
                   'Цели по кампаниям': 'каждая цель по кампаниям: достижения, доля, конверсия'
                   + (', цена цели' if logins else '')})
     write_summary(summary, counter, d1, d2, p1, p2, mtot, cur, prev, s_cur, status, a.no_compare, group,
-                  title=f'Яндекс Директ: {site}', about=about)
+                  title=f'Яндекс Директ: {site}', about=about, prev_name=COMPARE[mode][1])
     summary['A5'] = cost_note or ('Визиты и цели — по Метрике, последний значимый переход из Директа. '
                                   'Клики и расход — по данным Директа; с визитами они не совпадают: повторные заходы '
                                   'после рекламы Метрика тоже засчитывает Директу.')
@@ -1018,8 +1145,11 @@ def cmd_direct(a):
                                      'Глубина просмотра', 'Время на сайте', 'Посетители'])
             ctx = {'title': f'Яндекс Директ: {site}', 'site': site, 'tables': tables, 'costs': bool(logins),
                    'kpis': make_kpis(mtot, cur, prev, order), 'goal_sources': goal_src,
-                   'periods': [('Период', d1, d2)] + ([] if a.no_compare else [('Сравнение', p1, p2)]),
-                   'meta': f'счётчик {cid} · только реклама в Директе',
+                   'goal_sources_utm': goal_src_utm,
+                   'periods': [('Период', d1, d2)] + ([] if a.no_compare else [(COMPARE[mode][0], p1, p2)]),
+                   'meta': f'счётчик {cid} · только реклама в Директе{humans_note()}', 'vs': COMPARE[mode][2],
+                   'switch': {'cid': cid, 'kind': 'direct', 'mode': mode},
+                   'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': [cost_note] if cost_note else [],
                    'sampled_note': ('По выборке: ' + ', '.join(s[0] for s in status if s[3]) + '.')
@@ -1070,30 +1200,18 @@ FROM_YANDEX = "ym:s:lastsignSearchEngineRoot=='yandex'"
 LONG_CLICK = 59          # «длинный» визит — дольше 59 секунд
 LONG_NORM = 10           # норма доли длинных визитов по фразе — от 10–15 %
 LONG_MIN_VISITS = 10     # по фразе с меньшим числом визитов доля — шум
-YEAR = timedelta(days=364)
-SEO_TITLES = {'sources': 'Источники год к году', 'weeks': 'Поиск по неделям', 'entry': 'Страницы входа из поиска',
+SEO_TITLES = {'sources': 'Источники — сравнение', 'weeks': 'Поиск в динамике', 'entry': 'Страницы входа из поиска',
               'phrases': 'Фразы и страницы', 'long': 'Длинные клики', 'goals': 'Цели из поиска'}
 SEO_ORDER = list(SEO_TITLES)
 SEO_ABOUT = {
-    'Источники год к году': 'каждый источник трафика: сейчас, год назад и изменение',
-    'Поиск по неделям': 'визиты из поиска по неделям — всего, Яндекс, Google — против тех же недель год назад',
-    'Страницы входа из поиска': 'страницы, на которые приходят из поиска: поведение, цели и визиты год назад',
+    'Источники — сравнение': 'каждый источник трафика: сейчас, в сравниваемом периоде и изменение',
+    'Поиск в динамике': 'визиты из поиска по неделям (при «месяц к месяцу» — по дням) — всего, Яндекс, Google',
+    'Страницы входа из поиска': 'страницы, на которые приходят из поиска: поведение, цели и визиты для сравнения',
     'Фразы и страницы': 'поисковая фраза и страница, на которую по ней пришли',
     'Длинные клики': f'доля визитов из Яндекса дольше {LONG_CLICK} секунд по каждой фразе; норма — от 10–15 %',
     'Цели из поиска': 'каждая цель по поисковым системам: достижения, доля, конверсия',
 }
 CHANGE_FMT = {'pp': '+0.0" п.п.";-0.0" п.п.";0" п.п."', 'pct': '+0.0"%";-0.0"%";0"%"'}
-
-
-def seo_period(a):
-    """Заданные даты или последние полные недели по воскресенье: тогда год
-    назад выходят те же дни недели."""
-    if a.date_from or a.date_to:
-        return period(a)
-    d2 = date.today() - timedelta(days=1)
-    d2 -= timedelta(days=(d2.weekday() + 1) % 7)        # последнее воскресенье
-    weeks = max(1, -(-a.days // 7))
-    return d2 - timedelta(days=7 * weeks - 1), d2
 
 
 def change(v, pv, kind):
@@ -1114,8 +1232,8 @@ def yoy_merge(cur_rows, prev_rows, n):
     return out
 
 
-def write_yoy(ws, heads, metrics, merged, cur_tot, prev_tot):
-    """По каждой метрике три колонки: сейчас, год назад, изменение. Итоги — над шапкой."""
+def write_yoy(ws, heads, metrics, merged, cur_tot, prev_tot, prev_name='год назад'):
+    """По каждой метрике три колонки: сейчас, для сравнения, изменение. Итоги — над шапкой."""
     def line(v, pv):
         out = []
         for (_, _, kind), x, px in zip(metrics, v, pv):
@@ -1125,7 +1243,7 @@ def write_yoy(ws, heads, metrics, merged, cur_tot, prev_tot):
     nd = len(heads)
     cols = list(heads)
     for _, h, _ in metrics:
-        cols += [h, f'{h} — год назад', f'{h} — изменение']
+        cols += [h, f'{h} — {prev_name}', f'{h} — изменение']
     if cur_tot:
         ws.append(['Итого и в среднем'] + [None] * (nd - 1) + line(cur_tot, prev_tot or [None] * len(metrics)))
         for c in ws[1]:
@@ -1168,9 +1286,11 @@ def weekly(rows):
     return [(k, *v) for k, v in sorted(w.items())]
 
 
-def write_weeks(ws, cw, pw):
-    heads = ['Неделя (с понедельника)', 'Поиск', 'Яндекс', 'Google', 'Неделя год назад', 'Поиск год назад',
-             'Яндекс год назад', 'Google год назад', 'Поиск: изменение', 'Яндекс: изменение', 'Google: изменение']
+def write_weeks(ws, cw, pw, prev_name='год назад', step='Неделя (с понедельника)'):
+    unit = 'День' if step == 'День' else 'Неделя'
+    heads = [step, 'Поиск', 'Яндекс', 'Google', f'{unit} — {prev_name}', f'Поиск — {prev_name}',
+             f'Яндекс — {prev_name}', f'Google — {prev_name}', 'Поиск: изменение', 'Яндекс: изменение',
+             'Google: изменение']
     ws.append(heads)
     for c in ws[1]:
         c.font, c.fill = HEAD_FONT, HEAD_FILL
@@ -1178,8 +1298,8 @@ def write_weeks(ws, cw, pw):
     ws.row_dimensions[1].height = 32
     for i, cur in enumerate(cw):
         prev = pw[i] if i < len(pw) else (None, None, None, None)
-        ws.append([dim_value(cur[0], 'Неделя (с понедельника)'), *cur[1:],
-                   dim_value(prev[0], 'Неделя (с понедельника)') if prev[0] else None, *prev[1:],
+        ws.append([dim_value(cur[0], step), *cur[1:],
+                   dim_value(prev[0], step) if prev[0] else None, *prev[1:],
                    *(change(c, p, 'int') for c, p in zip(cur[1:], prev[1:]))])
     for row in ws.iter_rows(min_row=2):
         for c in row:
@@ -1238,8 +1358,8 @@ def write_long(ws, rows, total, total_long):
 def cmd_seo(a):
     counter = resolve_counter(a.counter)
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
-    d1, d2 = seo_period(a)
-    p1, p2 = d1 - YEAR, d2 - YEAR
+    d1, d2, p1, p2, mode = pick_periods(a, 'yoy')
+    prev_name = COMPARE[mode][1]
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else SEO_ORDER
     bad = [k for k in only if k not in SEO_TITLES]
@@ -1248,7 +1368,7 @@ def cmd_seo(a):
     org = {'filters': ORGANIC}
     iso = date.isoformat
     log(f'   SEO · счётчик {cid} · {site} · {d1:%d.%m.%Y}–{d2:%d.%m.%Y} ({days} дн.) · '
-        f'год назад: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}')
+        f'{prev_name}: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}{humans_note()}')
 
     want_charts = not a.no_charts
     if want_charts and not charts.available():
@@ -1288,17 +1408,19 @@ def cmd_seo(a):
                 cr, ct, sampled, n = stat(cid, mids, dim, iso(d1), iso(d2), top=100, sort='-ym:s:visits')
                 pr, pt, _, _ = stat(cid, mids, dim, iso(p1), iso(p2), top=100, sort='-ym:s:visits')
                 merged = yoy_merge(cr, pr, len(mids))
-                write_yoy(ws, ['Источник'], mtot, merged, ct, pt)
+                write_yoy(ws, ['Источник'], mtot, merged, ct, pt, prev_name)
                 tables[key] = merged
                 n = len(merged)
             elif key == 'weeks':
-                dims = ['ym:s:startOfWeek', 'ym:s:lastsignSearchEngineRoot']
+                # месяц к месяцу — по дням: недели на краях месяца неполные и выглядели бы провалами
+                step = 'ym:s:date' if mode == 'mom' else 'ym:s:startOfWeek'
+                dims = [step, 'ym:s:lastsignSearchEngineRoot']
                 cr, _, sampled, _ = stat(cid, ['ym:s:visits'], dims, iso(d1), iso(d2), top=2000,
-                                         sort='ym:s:startOfWeek', extra=org, ids=True)
+                                         sort=step, extra=org, ids=True)
                 pr, _, _, _ = stat(cid, ['ym:s:visits'], dims, iso(p1), iso(p2), top=2000,
-                                   sort='ym:s:startOfWeek', extra=org, ids=True)
+                                   sort=step, extra=org, ids=True)
                 cw, pw = weekly(cr), weekly(pr)
-                n = write_weeks(ws, cw, pw)
+                n = write_weeks(ws, cw, pw, prev_name, 'День' if mode == 'mom' else 'Неделя (с понедельника)')
                 tables[key] = (cw, pw)
             elif key == 'entry':
                 cr, ct, sampled, n = stat(cid, mids, ['ym:s:startURL'], iso(d1), iso(d2), top=a.top,
@@ -1306,7 +1428,7 @@ def cmd_seo(a):
                 pr, pt, _, _ = stat(cid, ['ym:s:visits'], ['ym:s:startURL'], iso(p1), iso(p2), top=a.top,
                                     sort='-ym:s:visits', extra=org)
                 was = {r[0][0]: r[1][0] for r in pr}
-                more = [('yoy:visits', 'Визиты год назад', 'int'), ('yoy:change', 'Изменение визитов, %', 'chg')]
+                more = [('yoy:visits', f'Визиты — {prev_name}', 'int'), ('yoy:change', 'Изменение визитов, %', 'chg')]
                 rows = [(d, list(v) + [was.get(d[0]), change(v[0], was.get(d[0]), 'int')]) for d, v in cr]
                 tot = list(ct or []) + ([pt[0] if pt else None, change(ct[0], pt[0], 'int')] if ct and pt else [None, None])
                 write_table(ws, ['Страница входа'], mtot + more, rows, tot)
@@ -1336,10 +1458,25 @@ def cmd_seo(a):
         status.append((title, ws.max_row - (2 if key in ('sources', 'entry', 'phrases', 'long') else 1), n,
                        sampled, None))
 
-    write_summary(summary, counter, d1, d2, p1, p2, mtot, cur, prev, s_cur, status, False, 'week',
-                  title=f'SEO: {site} — трафик из поиска', about=SEO_ABOUT, prev_name='год назад')
-    summary['A5'] = ('Итоги — только визиты из поисковых систем (последний значимый переход). '
-                     'Год назад — те же дни недели: период сдвинут на 52 недели.')
+    # Весь трафик — листы обычного отчёта Метрики за те же периоды, после листов поиска
+    group = pick_group(a, d1, d2)
+    traffic_summary = wb.create_sheet('Весь трафик — сводка')
+    try:
+        tr = collect_traffic(wb, cid, d1, d2, p1, p2, group, ORDER, a.top, False)
+        status += tr['status']
+        write_summary(traffic_summary, counter, d1, d2, p1, p2, tr['mtot'], tr['cur'], tr['prev'], tr['sampled'],
+                      [], False, group, title=f'Весь трафик: {site}', prev_name=prev_name)
+    except QueryError as e:
+        tr = None
+        note_sheet(traffic_summary, f'Весь трафик не получен: {e}')
+        log(f'   ⚠ весь трафик: {e}')
+
+    write_summary(summary, counter, d1, d2, p1, p2, mtot, cur, prev, s_cur, status, False, group,
+                  title=f'SEO: {site} — трафик из поиска', about={**traffic_about(group), **SEO_ABOUT},
+                  prev_name=prev_name)
+    summary['A5'] = ('Итоги — только визиты из поисковых систем (последний значимый переход); весь трафик — '
+                     'на листе «Весь трафик — сводка».' + (' Год назад — те же дни недели: период сдвинут на 52 недели.'
+                                                         if mode == 'yoy' else ''))
     summary['A5'].font = Font(color='52514E')
 
     folder = DATA / f'{cid}_{slug(site)}'
@@ -1356,13 +1493,27 @@ def cmd_seo(a):
                    'kpis': make_kpis(mtot, cur, prev, ['Визиты', 'Посетители', 'Достижения целей',
                                                         'Конверсия в любую цель, %', 'Отказы, %', 'Глубина просмотра',
                                                         'Время на сайте', 'Новые посетители, %']),
-                   'periods': [('Период', d1, d2), ('Год назад', p1, p2)],
-                   'meta': f'счётчик {cid} · только переходы из поиска · год назад — те же дни недели',
+                   'periods': [('Период', d1, d2), (COMPARE[mode][0], p1, p2)],
+                   'meta': f'счётчик {cid}{humans_note()}' + (' · год назад — те же дни недели' if mode == 'yoy' else ''),
+                   'prev_label': prev_name, 'cur_label': 'этот год' if mode == 'yoy' else 'сейчас',
+                   'step': 'дням' if mode == 'mom' else 'неделям',
+                   'switch': {'cid': cid, 'kind': 'seo', 'mode': mode},
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
-                   'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': 'к году назад',
+                   'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': COMPARE[mode][2],
                    'long_min': LONG_MIN_VISITS, 'long_click': LONG_CLICK,
                    'sampled_note': ('По выборке: ' + ', '.join(sampled) + '.') if sampled else ''}
-            pics = charts.build_seo(ctx, folder / f'charts_seo_{d1.isoformat()}_{d2.isoformat()}')
+            pics_dir = folder / f'charts_seo_{d1.isoformat()}_{d2.isoformat()}'
+            pics = charts.build_seo(ctx, pics_dir)
+            ctx['sections'] = [('Поиск', ctx['kpis'], pics)]
+            if tr:
+                tctx = panel_context(counter, site, d1, d2, p1, p2, group, tr['mtot'], tr['cur'], tr['prev'],
+                                     tr['tables'], tr['goal_list'], tr['status'], out_file.name, cid, False,
+                                     tr['goal_src'], mode)
+                tpics = charts.build(tctx, pics_dir / 'traffic')
+                ctx['sections'].append(('Весь трафик', tctx['kpis'], tpics))
+                if not warnings:
+                    warnings.extend(tctx['warnings'])
+                pics = pics + tpics
             charts.excel_panel(wb, ctx, pics)
             dashboard = charts.html_dashboard(folder / f'dashboard_seo_{stem}.html', ctx, pics)
         except Exception as e:  # noqa: BLE001
@@ -1399,6 +1550,9 @@ def main():
         p.add_argument('--from', dest='date_from', help='начало периода, ГГГГ-ММ-ДД')
         p.add_argument('--to', dest='date_to', help='конец периода, ГГГГ-ММ-ДД')
         p.add_argument('--top', type=int, default=TOP, help=f'строк на лист, по умолчанию {TOP}')
+        p.add_argument('--compare', choices=['yoy', 'mom', 'qoq'],
+                       help='сравнение: yoy — год к году, mom — месяц к месяцу, qoq — квартал к кварталу')
+        p.add_argument('--with-robots', action='store_true', help='считать и роботов (по умолчанию — только люди)')
 
     r = sub.add_parser('report', help='полный отчёт в Excel')
     r.add_argument('counter', help='номер счётчика или адрес сайта')
@@ -1436,6 +1590,8 @@ def main():
     pn.add_argument('--data', help='папка с отчётами, по умолчанию data рядом со скриптом')
 
     a = ap.parse_args()
+    global HUMANS_ONLY
+    HUMANS_ONLY = not getattr(a, 'with_robots', False)
     if getattr(a, 'days', 1) < 1:
         sys.exit('--days должно быть больше нуля')
     try:

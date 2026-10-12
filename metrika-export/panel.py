@@ -4,8 +4,10 @@
 
 /                счётчики: у каждого кнопки «Сформировать SEO-отчёт» и «Сформировать
                  Директ» с прогрессом; готовый отчёт — ссылкой рядом и на своей вкладке
-/metrika/        обычные отчёты Метрики (python run.py report)
-/seo/, /direct/  SEO-отчёты и отчёты по Директу
+/seo/, /direct/  SEO-отчёты (поиск и весь трафик) и отчёты по Директу
+
+Кнопки «Год к году», «Месяц к месяцу», «Квартал к кварталу» на странице отчёта
+запускают тот же отчёт с --compare и открывают новый, когда он готов.
 
 Отчёт строит тот же run.py в отдельном процессе: панель только запускает его и
 читает вывод — по строкам с названиями листов считает прогресс. Одновременно —
@@ -29,7 +31,6 @@ from urllib.parse import quote, urlparse
 
 # вид: (вкладка, адрес, заголовок, префикс панели, префикс Excel, команда run.py)
 KINDS = {
-    'metrika': ('Метрика', '/metrika/', 'Яндекс Метрика: отчёты', 'dashboard_', 'metrika_', 'report'),
     'seo': ('SEO', '/seo/', 'SEO: отчёты', 'dashboard_seo_', 'seo_', 'seo'),
     'direct': ('Директ', '/direct/', 'Яндекс Директ: отчёты', 'dashboard_direct_', 'direct_', 'direct'),
 }
@@ -104,7 +105,7 @@ async function poll() {
   const jobs = await api('/api/jobs');
   let busy = false;
   document.querySelectorAll('.act').forEach(el => {
-    const job = jobs[el.dataset.cid + ':' + el.dataset.kind];
+    const job = jobs[el.dataset.cid + ':' + el.dataset.kind + ':'];
     paint(el, job);
     if (job && (job.state === 'running' || job.state === 'queued')) busy = true;
   });
@@ -155,7 +156,7 @@ def serve(a, core):
 
     # ─── готовые отчёты ────────────────────────────────────────────────────
     def kind_of(name):
-        return next((k for k in ('seo', 'direct') if name.startswith(KINDS[k][3])), 'metrika')
+        return next((k for k in KINDS if name.startswith(KINDS[k][3])), None)
 
     def reports(kind):
         found = [p for p in root.glob('*/dashboard_*.html') if kind_of(p.name) == kind]
@@ -169,7 +170,8 @@ def serve(a, core):
         out = {}
         for p in sorted(root.glob('*/dashboard_*.html'), key=lambda f: f.stat().st_mtime):
             cid = p.parent.name.partition('_')[0]
-            out[(cid, kind_of(p.name))] = (link(p), datetime.fromtimestamp(p.stat().st_mtime))
+            if kind_of(p.name):
+                out[(cid, kind_of(p.name))] = (link(p), datetime.fromtimestamp(p.stat().st_mtime))
         return out
 
     # ─── счётчики и Директ ─────────────────────────────────────────────────
@@ -207,20 +209,21 @@ def serve(a, core):
 
     # ─── запуск отчётов ────────────────────────────────────────────────────
     def titles(kind):
-        names = {'seo': list(core.SEO_TITLES.values()),
-                 'direct': [core.DIRECT_SPECIAL.get(k) or core.DIRECT_REPORTS[k][0] for k in core.DIRECT_ORDER],
-                 'metrika': [core.SPECIAL.get(k) or core.REPORTS[k][0] for k in core.ORDER]}[kind]
+        traffic = [core.SPECIAL.get(k) or core.REPORTS[k][0] for k in core.ORDER]
+        names = {'seo': list(core.SEO_TITLES.values()) + traffic,      # в SEO-отчёте и весь трафик
+                 'direct': [core.DIRECT_SPECIAL.get(k) or core.DIRECT_REPORTS[k][0] for k in core.DIRECT_ORDER]}[kind]
         return set(names) | {'панель с графиками'}
 
     def run_job(key):
-        cid, kind = key
+        cid, kind, mode = key
         job = jobs[key]
         with slots:
             job.update(state='running', status='запуск…', progress=0.02)
             steps, total, tail = 0, len(titles(kind)) + 1, deque(maxlen=6)
             env = dict(os.environ, METRIKA_DATA=str(root), PYTHONIOENCODING='utf-8', PYTHONDONTWRITEBYTECODE='1')
             try:
-                p = subprocess.Popen([sys.executable, '-u', str(core.BASE / 'run.py'), KINDS[kind][5], cid],
+                cmd = [sys.executable, '-u', str(core.BASE / 'run.py'), KINDS[kind][5], cid]
+                p = subprocess.Popen(cmd + (['--compare', mode] if mode else []),
                                      cwd=str(core.BASE), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding='utf-8', errors='replace',
                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -250,8 +253,8 @@ def serve(a, core):
             else:
                 job.update(state='error', error=' / '.join(list(tail)[-2:]) or f'код выхода {code}')
 
-    def start(cid, kind):
-        key = (cid, kind)
+    def start(cid, kind, mode=''):
+        key = (cid, kind, mode)
         with lock:
             if key in jobs and jobs[key]['state'] in ('queued', 'running'):
                 return jobs[key]
@@ -297,8 +300,9 @@ def serve(a, core):
                         f'<span>{info}</span></div><div class="acts">{"".join(acts)}</div></li>')
         body = (tabs('home') + '<h1>Счётчики</h1>'
                 f'<p class="sub">Все счётчики, к которым есть доступ у токена: {len(items)}. Кнопка строит отчёт — '
-                f'готовый появится ссылкой рядом и на своей вкладке. SEO — 4 полные недели к году назад, '
-                f'Директ — 14 дней к прошлым 14.<span id="dstate"></span> '
+                f'готовый появится ссылкой рядом и на своей вкладке. SEO-отчёт — поиск и весь трафик, 4 полные '
+                f'недели к году назад; Директ — 14 дней к прошлым 14; на странице отчёта период можно '
+                f'переключить: год, месяц, квартал. Только люди, без роботов.<span id="dstate"></span> '
                 f'<a href="/?refresh=1">Обновить список</a></p>'
                 '<div class="tools"><input id="q" placeholder="Поиск: сайт, название или номер счётчика" autofocus>'
                 '<label><input type="checkbox" id="od"> только с Директом</label></div>'
@@ -347,8 +351,9 @@ def serve(a, core):
                     return self.send(listing(kind))
             if route == '/api/jobs':
                 with lock:
-                    out = {f'{c}:{k}': {x: v for x, v in j.items() if x in
-                                        ('state', 'progress', 'status', 'link', 'error')} for (c, k), j in jobs.items()}
+                    out = {f'{c}:{k}:{m}': {x: v for x, v in j.items() if x in
+                                            ('state', 'progress', 'status', 'link', 'error')}
+                           for (c, k, m), j in jobs.items()}
                 return self.send(json.dumps(out, ensure_ascii=False), 'application/json; charset=utf-8')
             if route == '/api/direct':
                 d = state['direct']
@@ -363,11 +368,11 @@ def serve(a, core):
                 return self.send('{"error": "forbidden"}', 'application/json', 403)
             try:
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
-                cid, kind = str(int(body['cid'])), body['kind']
-                assert kind in dict(BUTTONS)
+                cid, kind, mode = str(int(body['cid'])), body['kind'], body.get('mode') or ''
+                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq')
             except (ValueError, KeyError, AssertionError, TypeError):
                 return self.send('{"error": "bad request"}', 'application/json', 400)
-            job = start(cid, kind)
+            job = start(cid, kind, mode)
             return self.send(json.dumps({'state': job['state']}), 'application/json')
 
         def log_message(self, *args):            # без строки в терминале на каждый запрос
@@ -381,7 +386,7 @@ def serve(a, core):
     threading.Thread(target=scan_direct, daemon=True).start()
     url = f'http://127.0.0.1:{a.port}/'
     core.log(f'✅ панель: {url}  (только на этом компьютере; остановить — Ctrl+C)')
-    core.log(f'   счётчики и кнопки отчётов — на главной; отчёты: {url}metrika/ · {url}seo/ · {url}direct/')
+    core.log(f'   счётчики и кнопки отчётов — на главной; отчёты: {url}seo/ · {url}direct/')
     core.log(f'   отчёты лежат в {root}')
     if not a.no_browser:
         webbrowser.open(url)
