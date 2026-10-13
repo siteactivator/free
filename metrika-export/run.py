@@ -57,7 +57,7 @@ PAGE = 10000             # строк за запрос (API даёт до 100 0
 TOP = 10000              # строк на лист по умолчанию
 # «Запрос слишком сложный» (400) при перегрузке API: сначала повтор с паузой,
 # потом выборка — 50 %, затем 10 %. Лист с выборкой помечается в Сводке
-COMPLEX_RETRIES = 3     # под перегрузкой Яндекс режет запрос через ~10 с; через полминуты тот же проходит
+COMPLEX_RETRIES = 6     # под нагрузкой Яндекс отбивает часть запросов сразу; через несколько секунд тот же проходит
 SAMPLED_FALLBACK = ('0.5', '0.1')
 GOALS_PER_REQUEST = 10   # 2 метрики на цель; в одном запросе — до 20 метрик
 GOALS_BY_SOURCE = 9      # то же по источникам: визиты + 2 × 9 = 19 метрик
@@ -258,10 +258,11 @@ def _stat(counter, metrics, dims, d1, d2, top=TOP, sort=None, extra=None, ids=Fa
             if i + 1 < len(accuracies):
                 nxt = accuracies[i + 1]
                 if nxt == 'full':
-                    log(f'   API перегружено («запрос слишком сложный»), повтор через {15 * (i + 1)} с…')
-                    time.sleep(15 * (i + 1))
+                    log(f'   API перегружено («запрос слишком сложный»), повтор через {8 * (i + 1)} с…')
+                    time.sleep(8 * (i + 1))
                 else:
-                    log(f'   всё ещё «слишком сложный» — беру выборку {float(nxt):.0%}')
+                    log(f'   всё ещё «слишком сложный» — через 30 с беру выборку {float(nxt):.0%}')
+                    time.sleep(30)
     raise QueryError(f'API не отдало отчёт даже по выборке 10 %: {last}')
 
 
@@ -361,7 +362,8 @@ def cell_value(v, kind):
 def dim_value(v, header):
     if v is None or v == '':
         return '(не определено)'
-    if header in ('День', 'Неделя (с понедельника)', 'Месяц') and re.match(r'\d{4}-\d{2}-\d{2}$', str(v)):
+    if header in ('День', 'Неделя (с понедельника)', 'Неделя (7 дней с)', 'Месяц') and \
+            re.match(r'\d{4}-\d{2}-\d{2}$', str(v)):
         return datetime.strptime(v, '%Y-%m-%d').date()
     return v
 
@@ -429,8 +431,8 @@ def period(a):
 def pick_periods(a, default='prev'):
     """Период и с чем сравнить: (начало, конец, начало сравнения, конец сравнения, режим).
 
-    prev — столько же дней прямо перед периодом; yoy — полные недели по прошлое
-    воскресенье против тех же недель год назад; mom, qoq — последний полный месяц
+    prev — столько же дней прямо перед периодом; yoy — целые недели по вчера
+    против тех же дней недели год назад (минус 364 дня); mom, qoq — последний полный месяц
     или квартал против предыдущего. С явными --from/--to: yoy — те же даты минус
     52 недели, остальное — как prev."""
     mode = getattr(a, 'compare', None) or default
@@ -452,8 +454,9 @@ def pick_periods(a, default='prev'):
         p2 = d1 - timedelta(days=1)
         return d1, d2, quarter(p2), p2, mode
     elif mode == 'yoy':
+        # по вчера — самый свежий полный день; недели целые (кратно 7 дням), а год назад —
+        # минус 52 недели: дни недели совпадают и без привязки к понедельнику
         d2 = today - timedelta(days=1)
-        d2 -= timedelta(days=(d2.weekday() + 1) % 7)            # последнее воскресенье
         d1 = d2 - timedelta(days=7 * max(1, -(-a.days // 7)) - 1)
         return d1, d2, d1 - YEAR, d2 - YEAR, mode
     else:
@@ -1367,8 +1370,8 @@ def cmd_direct(a):
 # ─── SEO-отчёт: пять срезов Метрики для поискового трафика ──────────────────
 # По статье Pixelplus «Яндекс Метрика для SEO»: источники год к году, страницы
 # входа из поиска, фразы с привязкой к странице, длинные клики по фразам, цели
-# из поиска. Год назад — со сдвигом на 364 дня: те же дни недели и те же
-# полные недели, иначе выходные съедут и сравнение соврёт
+# из поиска. Год назад — со сдвигом на 364 дня: те же дни недели, иначе
+# выходные съедут и сравнение соврёт
 ORGANIC = "ym:s:lastsignTrafficSource=='organic'"
 FROM_YANDEX = "ym:s:lastsignSearchEngineRoot=='yandex'"
 LONG_CLICK = 59          # «длинный» визит — дольше 59 секунд
@@ -1459,6 +1462,17 @@ def weekly(rows):
         elif engine == 'google':
             x[2] += v
     return [(k, *v) for k, v in sorted(w.items())]
+
+
+def in_weeks(rows, start):
+    """Дни → недели по 7 дней от начала периода: дата каждой строки заменяется на
+    первый день её недели. weekly() потом сложит их."""
+    out = []
+    for dims, vals in rows:
+        day = date.fromisoformat(dims[0][0])
+        week = start + timedelta(days=7 * ((day - start).days // 7))
+        out.append(([(week.isoformat(), None)] + list(dims[1:]), vals))
+    return out
 
 
 def write_weeks(ws, cw, pw, prev_name='год назад', step='Неделя (с понедельника)'):
@@ -1589,14 +1603,19 @@ def cmd_seo(a):
                 n = len(merged)
             elif key == 'weeks':
                 # месяц к месяцу — по дням: недели на краях месяца неполные и выглядели бы провалами
-                step = 'ym:s:date' if mode == 'mom' else 'ym:s:startOfWeek'
+                # год к году — по дням, сложенным в недели по 7 дней от начала периода (он кратен
+                # неделе и кончается вчера); месяц — по дням; квартал — календарными неделями
+                step = 'ym:s:startOfWeek' if mode == 'qoq' else 'ym:s:date'
                 dims = [step, 'ym:s:lastsignSearchEngineRoot']
-                cr, _, sampled, _ = stat(cid, ['ym:s:visits'], dims, iso(d1), iso(d2), top=2000,
+                cr, _, sampled, _ = stat(cid, ['ym:s:visits'], dims, iso(d1), iso(d2), top=5000,
                                          sort=step, extra=org, ids=True)
-                pr, _, _, _ = stat(cid, ['ym:s:visits'], dims, iso(p1), iso(p2), top=2000,
+                pr, _, _, _ = stat(cid, ['ym:s:visits'], dims, iso(p1), iso(p2), top=5000,
                                    sort=step, extra=org, ids=True)
+                if mode == 'yoy':
+                    cr, pr = in_weeks(cr, d1), in_weeks(pr, p1)
                 cw, pw = weekly(cr), weekly(pr)
-                n = write_weeks(ws, cw, pw, prev_name, 'День' if mode == 'mom' else 'Неделя (с понедельника)')
+                n = write_weeks(ws, cw, pw, prev_name, {'mom': 'День', 'qoq': 'Неделя (с понедельника)'}
+                                .get(mode, 'Неделя (7 дней с)'))
                 tables[key] = (cw, pw)
             elif key == 'entry':
                 cr, ct, sampled, n = stat(cid, mids, ['ym:s:startURL'], iso(d1), iso(d2), top=a.top,
