@@ -519,6 +519,22 @@ def set_focus_goal(cid, arg, required=False):
     return chosen
 
 
+def focus_only(goals):
+    """При выбранных главных целях листы и карты целей — только по ним."""
+    if not FOCUS_GOALS:
+        return goals
+    ids = {g for g, _ in FOCUS_GOALS}
+    return [g for g in goals if g['id'] in ids]
+
+
+def all_goal_options(cid):
+    """Все цели счётчика для выбора на странице отчёта — даже если отчёт построен по части."""
+    try:
+        return [(gid, name) for gid, name, _ in goal_choices(cid)]
+    except QueryError:
+        return []
+
+
 def goal_note():
     if not FOCUS_GOALS:
         return ''
@@ -724,16 +740,22 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
     kpis = make_kpis(mtot, cur, prev)
     dynamics = None
     if 'dynamics' in tables:
-        _, _, rows, _ = tables['dynamics']
+        _, dmets, rows, _ = tables['dynamics']
         dates = [datetime.strptime(r[0][0], '%Y-%m-%d').date() for r in rows]
         dynamics = {'dates': dates, 'cur': [r[1][0] or 0 for r in rows], 'prev': None,
                     'label': {'day': 'дням', 'week': 'неделям', 'month': 'месяцам'}[group]}
+        ids = [m[0] for m in dmets]
+        if FOCUS_GOALS and GOAL_ANY[0] in ids:
+            dynamics['goal_cur'] = [r[1][ids.index(GOAL_ANY[0])] or 0 for r in rows]
         dynamics['partial_tail'] = partial_tail(dynamics['cur'], group)
         if not no_compare:
             dim = GROUPS[group][0]
             try:
-                prev_rows, _, _, _ = stat(cid, ['ym:s:visits'], [dim], p1.isoformat(), p2.isoformat(), sort=dim)
+                prev_rows, _, _, _ = stat(cid, ['ym:s:visits'] + ([GOAL_ANY[0]] if FOCUS_GOALS else []), [dim],
+                                          p1.isoformat(), p2.isoformat(), sort=dim)
                 dynamics['prev'] = [r[1][0] or 0 for r in prev_rows]
+                if FOCUS_GOALS:
+                    dynamics['goal_prev'] = [r[1][1] or 0 for r in prev_rows]
             except QueryError as e:
                 log(f'   прошлый период для графика динамики не получен: {e}')
     sampled = [s[0] for s in status if s[3]]
@@ -749,7 +771,7 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
         'goals': [(g.get('name'), reach) for g, reach in goal_list],
         'goal_sources': goal_src or {},
         'periods': [('Период', d1, d2)] + ([] if no_compare else [(COMPARE[mode][0], p1, p2)]),
-        'meta': f'счётчик {cid}{humans_note()}{goal_note()}', 'vs': COMPARE[mode][2],
+        'meta': f'счётчик {cid}{humans_note()}{goal_note()}', 'vs': COMPARE[mode][2], 'focus': bool(FOCUS_GOALS),
         'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
         'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}',
         'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
@@ -762,7 +784,7 @@ def goals_sheet(ws, cid, d1, d2, collect=None):
     title = ws.title
     log(f'   {title}…')
     try:
-        goals = api_get(f'/management/v1/counter/{cid}/goals').get('goals') or []
+        goals = focus_only(api_get(f'/management/v1/counter/{cid}/goals').get('goals') or [])
     except QueryError as e:
         note_sheet(ws, f'Не получено: {e}')
         return (title, 0, 0, None, str(e))
@@ -814,8 +836,8 @@ def goal_sources_sheet(ws, cid, d1, d2, known=None, collect=None, dim='ym:s:last
     title = ws.title
     log(f'   {title}…')
     try:
-        goals = ([g for g, _ in known] if known else
-                 api_get(f'/management/v1/counter/{cid}/goals').get('goals') or [])
+        goals = focus_only([g for g, _ in known] if known else
+                           api_get(f'/management/v1/counter/{cid}/goals').get('goals') or [])
     except QueryError as e:
         note_sheet(ws, f'Не получено: {e}')
         return (title, 0, 0, None, str(e))
@@ -1325,7 +1347,7 @@ def cmd_direct(a):
                    'vs': COMPARE[mode][2],
                    'switch': {'cid': cid, 'kind': 'direct', 'mode': mode,
                               'goal': ','.join(str(g) for g, _ in FOCUS_GOALS)},
-                   'goal_options': goal_options(goal_src, goal_src_utm),
+                   'goal_options': all_goal_options(cid), 'focus': bool(FOCUS_GOALS),
                    'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': [cost_note] if cost_note else [],
@@ -1339,11 +1361,16 @@ def cmd_direct(a):
                 dyn['partial_tail'] = partial_tail(dyn['cur'], group)
                 if len(mets) > len(M_DIRECT):
                     dyn['cost'] = [r[1][len(M_DIRECT) + 1] or 0 for r in rows]
+                if FOCUS_GOALS:
+                    dyn['goal_cur'] = [r[1][reach_i] or 0 for r in rows]
                 if not a.no_compare:
                     try:
-                        prev_rows, _, _, _ = stat(cid, ['ym:s:visits'], [GROUPS[group][0]], p1.isoformat(),
-                                                  p2.isoformat(), sort=GROUPS[group][0], extra=flt)
+                        prev_rows, _, _, _ = stat(cid, ['ym:s:visits'] + ([GOAL_ANY[0]] if FOCUS_GOALS else []),
+                                                  [GROUPS[group][0]], p1.isoformat(), p2.isoformat(),
+                                                  sort=GROUPS[group][0], extra=flt)
                         dyn['prev'] = [r[1][0] or 0 for r in prev_rows]
+                        if FOCUS_GOALS:
+                            dyn['goal_prev'] = [r[1][1] or 0 for r in prev_rows]
                     except QueryError as e:
                         log(f'   прошлый период для графика динамики не получен: {e}')
                 if dyn['partial_tail']:
@@ -1450,18 +1477,22 @@ def write_yoy(ws, heads, metrics, merged, cur_tot, prev_tot, prev_name='год �
 
 
 def weekly(rows):
-    """[(неделя, всего из поиска, Яндекс, Google)] из строк «неделя × поисковик»."""
-    w = {}
+    """[(неделя, всего из поиска, Яндекс, Google[, достижения целей])] из строк «неделя ×
+    поисковик»; достижения — если они были в запросе (выбраны главные цели)."""
+    w, goals = {}, False
     for dims, vals in rows:
         week, engine = dims[0][0], dims[1][1]
-        x = w.setdefault(week, [0, 0, 0])
+        x = w.setdefault(week, [0, 0, 0, 0])
         v = vals[0] or 0
         x[0] += v
         if engine == 'yandex':
             x[1] += v
         elif engine == 'google':
             x[2] += v
-    return [(k, *v) for k, v in sorted(w.items())]
+        if len(vals) > 1:
+            goals = True
+            x[3] += vals[1] or 0
+    return [(k, *(v if goals else v[:3])) for k, v in sorted(w.items())]
 
 
 def in_weeks(rows, start):
@@ -1477,25 +1508,26 @@ def in_weeks(rows, start):
 
 def write_weeks(ws, cw, pw, prev_name='год назад', step='Неделя (с понедельника)'):
     unit = 'День' if step == 'День' else 'Неделя'
-    heads = [step, 'Поиск', 'Яндекс', 'Google', f'{unit} — {prev_name}', f'Поиск — {prev_name}',
-             f'Яндекс — {prev_name}', f'Google — {prev_name}', 'Поиск: изменение', 'Яндекс: изменение',
-             'Google: изменение']
+    names = ['Поиск', 'Яндекс', 'Google'] + ([charts.lbl('Достижения целей')] if cw and len(cw[0]) > 4 else [])
+    k = len(names)
+    heads = ([step, *names, f'{unit} — {prev_name}'] + [f'{n} — {prev_name}' for n in names]
+             + [f'{n}: изменение' for n in names])
     ws.append(heads)
     for c in ws[1]:
         c.font, c.fill = HEAD_FONT, HEAD_FILL
         c.alignment = Alignment(horizontal='center', vertical='center', wrap_text=True)
     ws.row_dimensions[1].height = 32
     for i, cur in enumerate(cw):
-        prev = pw[i] if i < len(pw) else (None, None, None, None)
-        ws.append([dim_value(cur[0], step), *cur[1:],
-                   dim_value(prev[0], step) if prev[0] else None, *prev[1:],
-                   *(change(c, p, 'int') for c, p in zip(cur[1:], prev[1:]))])
+        prev = pw[i] if i < len(pw) else (None,) * (k + 1)
+        ws.append([dim_value(cur[0], step), *cur[1:k + 1],
+                   dim_value(prev[0], step) if prev[0] else None, *prev[1:k + 1],
+                   *(change(c, p, 'int') for c, p in zip(cur[1:k + 1], prev[1:k + 1]))])
     for row in ws.iter_rows(min_row=2):
         for c in row:
-            c.number_format = ('DD.MM.YYYY' if c.column in (1, 5) else FORMATS['int'] if c.column < 9
+            c.number_format = ('DD.MM.YYYY' if c.column in (1, k + 2) else FORMATS['int'] if c.column <= 2 * k + 2
                                else CHANGE_FMT['pct'])
-    for i, w in enumerate((14, 11, 11, 11, 14, 13, 13, 13, 13, 13, 13), 1):
-        ws.column_dimensions[get_column_letter(i)].width = w
+    for i in range(1, len(heads) + 1):
+        ws.column_dimensions[get_column_letter(i)].width = 14 if i in (1, k + 2) else 13
     ws.freeze_panes = 'B2'
     return len(cw)
 
@@ -1607,9 +1639,10 @@ def cmd_seo(a):
                 # неделе и кончается вчера); месяц — по дням; квартал — календарными неделями
                 step = 'ym:s:startOfWeek' if mode == 'qoq' else 'ym:s:date'
                 dims = [step, 'ym:s:lastsignSearchEngineRoot']
-                cr, _, sampled, _ = stat(cid, ['ym:s:visits'], dims, iso(d1), iso(d2), top=5000,
+                wm = ['ym:s:visits'] + ([GOAL_ANY[0]] if FOCUS_GOALS else [])
+                cr, _, sampled, _ = stat(cid, wm, dims, iso(d1), iso(d2), top=5000,
                                          sort=step, extra=org, ids=True)
-                pr, _, _, _ = stat(cid, ['ym:s:visits'], dims, iso(p1), iso(p2), top=5000,
+                pr, _, _, _ = stat(cid, wm, dims, iso(p1), iso(p2), top=5000,
                                    sort=step, extra=org, ids=True)
                 if mode == 'yoy':
                     cr, pr = in_weeks(cr, d1), in_weeks(pr, p1)
@@ -1695,7 +1728,7 @@ def cmd_seo(a):
                    'step': 'дням' if mode == 'mom' else 'неделям',
                    'switch': {'cid': cid, 'kind': 'seo', 'mode': mode,
                               'goal': ','.join(str(g) for g, _ in FOCUS_GOALS)},
-                   'goal_options': goal_options(goal_src),
+                   'goal_options': all_goal_options(cid), 'focus': bool(FOCUS_GOALS),
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': COMPARE[mode][2],
                    'long_min': LONG_MIN_VISITS, 'long_click': LONG_CLICK,

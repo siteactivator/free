@@ -19,6 +19,7 @@ MUTED = '#898781'
 GRID = '#e1e0d9'
 BASELINE = '#c3c2b7'
 SURFACE = '#fcfcfb'
+GOAL_C = '#ee7b2f'      # достижения целей — оранжевым рядом с синими визитами
 
 # Шапка панели и страниц отчётов — как на sait-activator.ru: логотип (logo.png рядом со
 # скриптом) и две кнопки. Свои ссылки и подписи — здесь
@@ -195,12 +196,24 @@ def _bars(plt, sns, labels, values, title, out_dir, name, fmt=_num, color=ACCENT
 
 
 def _dynamics(plt, sns, dates, cur, prev, group_label, out_dir, partial_tail=0, title=None, name='dynamics',
-              fmt=None, prev_label='прошлый период', cur_label='текущий период'):
+              fmt=None, prev_label='прошлый период', cur_label='текущий период', goal_cur=None, goal_prev=None,
+              goal_label='Достижения целей'):
     """Визиты текущего периода и прошлого — на одной оси, прошлый серым.
 
     partial_tail — сколько последних точек Метрика, похоже, ещё не досчитала:
-    они идут пунктиром с подписью, чтобы недосчёт не читался как обвал трафика."""
-    fig, ax = _figure(plt, 11, 3.8, title or f'Визиты по {group_label}')
+    они идут пунктиром с подписью, чтобы недосчёт не читался как обвал трафика.
+
+    goal_cur/goal_prev — достижения главных целей: отдельной полосой под визитами с общей
+    осью дат. На одну ось с визитами их не положить — визитов в сотни раз больше, а
+    вторая ось врёт масштабом."""
+    if goal_cur and any(goal_cur):
+        fig, (ax, ag) = plt.subplots(2, 1, figsize=(11, 5.9), sharex=True, layout='constrained',
+                                     gridspec_kw={'height_ratios': [2.2, 1]})
+        fig.suptitle(title or f'Визиты по {group_label}', x=0.01, ha='left', fontsize=13, fontweight='semibold',
+                     color=INK)
+    else:
+        goal_cur = None
+        fig, ax = _figure(plt, 11, 3.8, title or f'Визиты по {group_label}')
     fmt = fmt or _num
     x = list(range(len(cur)))
     if prev and any(v is not None for v in prev):
@@ -228,6 +241,58 @@ def _dynamics(plt, sns, dates, cur, prev, group_label, out_dir, partial_tail=0, 
     ax.tick_params(length=0)
     # легенда — над графиком справа: внутри она ложится на линию, когда значения у верхнего края
     ax.legend(loc='lower right', bbox_to_anchor=(1, 1.01), borderaxespad=0, fontsize=9.5, ncol=2, labelcolor=INK_2)
+    if goal_cur:
+        gx = list(range(len(goal_cur)))
+        if goal_prev and any(goal_prev):
+            ag.plot(gx[:len(goal_prev)], goal_prev[:len(gx)], color=PREVIOUS, linewidth=1.8, linestyle=(0, (4, 3)),
+                    label=prev_label)
+        gk = max(1, len(goal_cur) - partial_tail)
+        ag.plot(gx[:gk], goal_cur[:gk], color=GOAL_C, linewidth=2, solid_capstyle='round', label=cur_label)
+        if partial_tail:
+            ag.plot(gx[gk - 1:], goal_cur[gk - 1:], color=GOAL_C, linewidth=2, linestyle=(0, (1.5, 2.5)), alpha=0.6)
+        ag.scatter([gx[-1]], [goal_cur[-1]], s=36, color=GOAL_C, edgecolor=SURFACE, linewidth=1.5, zorder=3)
+        ag.annotate(_num(goal_cur[-1]), (gx[-1], goal_cur[-1]), xytext=(8, 0), textcoords='offset points',
+                    va='center', fontsize=9.5, color=INK_2)
+        ag.set_title(goal_label, loc='left', fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
+        ag.set_ylim(bottom=0)
+        ag.yaxis.set_major_formatter(plt.FuncFormatter(_tick))
+        ag.grid(axis='x', visible=False)
+        sns.despine(ax=ag, left=True)
+        ag.tick_params(length=0)
+        ag.legend(loc='lower right', bbox_to_anchor=(1, 1.01), borderaxespad=0, fontsize=9, ncol=2,
+                  labelcolor=INK_2)
+    return _save(fig, out_dir, name)
+
+
+def _pair(plt, sns, labels, visits, reach, conv, title, out_dir, name, goal_label='Достижения целей', note=None):
+    """Рейтинг в две колонки с общими подписями: слева визиты, справа достижения главных
+    целей и конверсия в них. У каждой колонки свой масштаб — иначе достижения не видны."""
+    n = len(labels)
+    fig, (a1, a2) = plt.subplots(1, 2, figsize=(6.4, 0.44 * n + 1.5 + (0.35 if note else 0)), sharey=True,
+                                 layout='constrained', gridspec_kw={'width_ratios': [1.15, 1]})
+    fig.suptitle(title, x=0.01, ha='left', fontsize=13, fontweight='semibold', color=INK)
+    if note:
+        import textwrap
+        fig.supxlabel(textwrap.fill(note, 96), x=0.01, ha='left', fontsize=8.5, color=MUTED)
+    y = list(range(n))
+    a1.barh(y, [v or 0 for v in visits], color=ACCENT, height=0.6)
+    a2.barh(y, [r or 0 for r in reach], color=GOAL_C, height=0.6)
+    a1.set_yticks(y)
+    a1.set_yticklabels(labels)
+    a1.invert_yaxis()
+    pct = lambda c: f'{c:.1f}%'.replace('.', ',')  # noqa: E731
+    texts = ([_num(v) for v in visits],
+             [f'{_num(r)} · {pct(c)}' if c is not None else _num(r) for r, c in zip(reach, conv)])
+    for ax, vals, txt, head in ((a1, visits, texts[0], 'Визиты'), (a2, reach, texts[1], goal_label)):
+        top = max((v or 0 for v in vals), default=0)
+        ax.set_xlim(0, top * 1.55 if top else 1)
+        for i, (v, t) in enumerate(zip(vals, txt)):
+            ax.text((v or 0) + top * 0.02, i, t, va='center', ha='left', fontsize=9.5, color=INK_2)
+        ax.set_title(head, loc='left', fontsize=10.5, color=INK_2, pad=4, fontweight='normal')
+        ax.grid(False)
+        ax.xaxis.set_visible(False)
+        sns.despine(ax=ax, left=ax is a2, bottom=True)
+        ax.tick_params(length=0)
     return _save(fig, out_dir, name)
 
 
@@ -332,7 +397,8 @@ def build(ctx, out_dir):
     if dyn and dyn['cur']:
         p = _dynamics(plt, sns, dyn['dates'], dyn['cur'], dyn.get('prev'), dyn['label'], out_dir,
                       dyn.get('partial_tail', 0), prev_label=ctx.get('prev_label', 'прошлый период'),
-                      cur_label=ctx.get('cur_label', 'текущий период'))
+                      cur_label=ctx.get('cur_label', 'текущий период'), goal_cur=dyn.get('goal_cur'),
+                      goal_prev=dyn.get('goal_prev'), goal_label=lbl('Достижения целей'))
         charts['dynamics'] = ('Динамика визитов', p, f'Серым — {ctx.get("prev_label", "прошлый период")}, '
                                                      f'по порядку дней — лист «Динамика»')
 
@@ -351,6 +417,11 @@ def build(ctx, out_dir):
         return ([_short(x[0] if x[0] not in (None, '') else '(не определено)', site=ctx['site']) for x in out],
                 [x[1] for x in out])
 
+    def goal_idx(key):
+        ids = [m[0] for m in t[key][1]]
+        return (ids.index('ym:s:sumGoalReachesAny') if 'ym:s:sumGoalReachesAny' in ids else None,
+                ids.index('ym:s:anyGoalConversionRate') if 'ym:s:anyGoalConversionRate' in ids else None)
+
     for key, title, name, caption, kw in (
         ('sources', 'Визиты по источникам', 'sources', 'Последний значимый источник — лист «Источники»', {}),
         ('engines', 'Визиты из поисковых систем', 'engines', 'Лист «Поисковые системы»', {}),
@@ -362,8 +433,18 @@ def build(ctx, out_dir):
     ):
         n = 12 if key == 'phrases' else 10
         labels, values = rows_of(key, n, **kw)
-        if len(labels) >= 2:
+        if len(labels) < 2:
+            continue
+        ri, ci = goal_idx(key) if ctx.get('focus') else (None, None)
+        if ri is None:
             charts[name] = (title, _bars(plt, sns, labels, values, title, out_dir, name), caption)
+            continue
+        # те же строки, что у визитов, — достижения и конверсия главных целей рядом
+        sel = [r for r in t[key][2] if r[1][0] is not None
+               and (not kw.get('skip_undefined') or r[0][0] not in (None, ''))][:n]
+        charts[name] = (title, _pair(plt, sns, labels, values, [r[1][ri] for r in sel],
+                                     [r[1][ci] if ci is not None else None for r in sel], title, out_dir, name,
+                                     goal_label=lbl('Достижения целей')), caption)
 
     # Конверсия по источникам — только источники от 100 визитов, иначе шум
     if 'sources' in t:
@@ -374,10 +455,10 @@ def build(ctx, out_dir):
             sel.sort(key=lambda x: -x[1])
             if len(sel) >= 2:
                 p = _bars(plt, sns, [_short(s[0], site=ctx['site']) for s in sel], [s[1] for s in sel],
-                          'Конверсия в любую цель по источникам, %', out_dir, 'conversion',
+                          lbl('Конверсия в любую цель, %')[:-3] + ' по источникам, %', out_dir, 'conversion',
                           fmt=lambda v: f'{v:.1f}%'.replace('.', ','),
-                          note='Источники от 100 визитов. Цели вовлечённости («3 страницы», «время на сайте») '
-                               'тоже входят в конверсию.')
+                          note='Источники от 100 визитов.' + ('' if ctx.get('focus') else
+                               ' Цели вовлечённости («3 страницы», «время на сайте») тоже входят в конверсию.'))
                 charts['conversion'] = ('Конверсия по источникам', p, 'Лист «Источники»')
 
     goals = ctx.get('goals') or []
@@ -471,7 +552,8 @@ def build_direct(ctx, out_dir):
         p = _dynamics(plt, sns, dyn['dates'], dyn['cur'], dyn.get('prev'), dyn['label'], out_dir,
                       dyn.get('partial_tail', 0), title=f'Визиты из Директа по {dyn["label"]}',
                       prev_label=ctx.get('prev_label', 'прошлый период'),
-                      cur_label=ctx.get('cur_label', 'текущий период'))
+                      cur_label=ctx.get('cur_label', 'текущий период'), goal_cur=dyn.get('goal_cur'),
+                      goal_prev=dyn.get('goal_prev'), goal_label=lbl('Достижения целей'))
         charts['dynamics'] = ('Визиты из Директа', p, 'Прошлый период совмещён по порядку дней — лист «Динамика»')
         if dyn.get('cost') and any(dyn['cost']):
             p = _dynamics(plt, sns, dyn['dates'], dyn['cost'], None, dyn['label'], out_dir,
@@ -500,6 +582,18 @@ def build_direct(ctx, out_dir):
         sel = sel[:n]
         if len(sel) >= 2:
             labels = [_short(x[0] if x[0] not in (None, '') else '(не определено)', site=ctx['site']) for x in sel]
+            names = [m[1] for m in t[key][1]]
+            if label == 'Визиты' and ctx.get('focus') and 'Достижения целей' in names:
+                # визиты и рядом — достижения главных целей с конверсией, по тем же строкам
+                ri = names.index('Достижения целей')
+                ci = names.index('Конверсия в любую цель, %') if 'Конверсия в любую цель, %' in names else None
+                rows_sel = [r for r in rows if r[1][i] is not None and (r[1][0] or 0) >= min_visits][:n]
+                charts[name] = (title, _pair(plt, sns, labels, [x[1] for x in sel],
+                                             [r[1][ri] for r in rows_sel],
+                                             [r[1][ci] if ci is not None else None for r in rows_sel],
+                                             title, out_dir, name, goal_label=lbl('Достижения целей'),
+                                             note=note), caption)
+                return
             charts[name] = (title, _bars(plt, sns, labels, [x[1] for x in sel], title, out_dir, name,
                                          fmt=fmt, note=note), caption)
 
@@ -509,7 +603,8 @@ def build_direct(ctx, out_dir):
     ctitle = 'кампаниям' if ck == 'campaigns' else 'кампаниям (utm_campaign)'
     bars(ck, 'Визиты', f'Визиты по {ctitle}', 'campaigns', f'Лист «{csheet}»')
     bars(ck, 'Конверсия в любую цель, %', f'Конверсия по {ctitle}, %', 'camp_conv', f'Лист «{csheet}»',
-         min_visits=30, fmt=pct, note='Кампании от 30 визитов. Цели вовлечённости тоже входят в конверсию.')
+         min_visits=30, fmt=pct, note='Кампании от 30 визитов.' + ('' if ctx.get('focus') else
+                                      ' Цели вовлечённости тоже входят в конверсию.'))
 
     # Автотаргетинг против ключевых фраз — по метке utm_term
     if t.get('autotarget'):
@@ -523,7 +618,7 @@ def build_direct(ctx, out_dir):
             labels = [f'{n} · {pct(c)}' if c is not None else n for n, _, c in sel]
             charts['autotarget'] = ('Автотаргетинг и фразы', _bars(
                 plt, sns, labels, [v for _, v, _ in sel], 'Автотаргетинг и ключевые фразы: визиты', out_dir,
-                'autotarget', note='После точки — конверсия в любую цель. По метке utm_term: «---autotargeting» '
+                'autotarget', note='После точки — конверсия. По метке utm_term: «---autotargeting» '
                                    '— автотаргетинг, остальное — ключевые фразы.'
                                    + (f' Ещё {_num(untagged)} визитов — без метки utm_term (кампании, где фраза '
                                       f'в метку не подставляется).' if untagged else '')),
@@ -566,8 +661,8 @@ def build_direct(ctx, out_dir):
     if ctx.get('costs'):
         bars('campaigns', 'Расход, ₽', 'Расход по кампаниям, ₽', 'camp_cost', 'Лист «Кампании»', fmt=_money)
         bars('campaigns', 'Цена цели, ₽', 'Цена цели по кампаниям, ₽', 'camp_cpa',
-             'Расход кампании, делённый на все достижения целей — лист «Кампании»', fmt=_money, reverse=True,
-             note='Дешевле — выше. Цели вовлечённости тоже входят в достижения.')
+             'Расход кампании, делённый на достижения главных целей — лист «Кампании»', fmt=_money, reverse=True,
+             note='Дешевле — выше.' + ('' if ctx.get('focus') else ' Цели вовлечённости тоже входят в достижения.'))
     bars('placetype', 'Визиты', 'Поиск и сети: визиты', 'placetype', 'Лист «Поиск и сети»')
     bars('placetype', 'Расход, ₽', 'Поиск и сети: расход, ₽', 'placetype_cost', 'Лист «Поиск и сети»', fmt=_money)
     if t.get('cities'):
@@ -587,8 +682,7 @@ def build_direct(ctx, out_dir):
             charts['goal_cost'] = ('Цена целей', _bars(
                 plt, sns, [f'{_short(n, 34)} · {_num(r)}' for n, r, _, _ in top], [c for _, _, c, _ in top],
                 'Цена цели, ₽ — по каждой цели', out_dir, 'goal_cost', fmt=_money,
-                note='Весь расход Директа за период, делённый на достижения цели (после точки). Цели '
-                     'вовлечённости дешёвые — смотрите на заявки, звонки и покупки.'), 'Лист «Цена целей»')
+                note='Весь расход Директа за период, делённый на достижения цели (после точки).'), 'Лист «Цена целей»')
     bars('conditions', 'Визиты', 'Ключевые фразы — топ-12 по визитам', 'conditions', 'Лист «Ключевые фразы»', n=12)
     bars('queries', 'Визиты', 'Поисковые запросы — топ-12', 'queries', 'Что искали перед кликом — лист «Поисковые запросы»',
          n=12)
@@ -622,10 +716,13 @@ def build_seo(ctx, out_dir):
 
     if t.get('weeks') and t['weeks'][0]:
         cw, pw = t['weeks']
+        goals = len(cw[0]) > 4
         p = _dynamics(plt, sns, [date.fromisoformat(w[0]) for w in cw], [w[1] for w in cw],
                       [w[1] for w in pw] or None, step, out_dir,
                       title=f'Визиты из поиска по {step}: {cur} и {prev}', name='weeks',
-                      prev_label=prev, cur_label=cur)
+                      prev_label=prev, cur_label=cur, goal_cur=[w[4] for w in cw] if goals else None,
+                      goal_prev=[w[4] for w in pw] if goals and pw and len(pw[0]) > 4 else None,
+                      goal_label=lbl('Достижения целей'))
         charts['weeks'] = ('Поиск в динамике', p, f'Серым — {prev}, по порядку {step} — лист «Поиск в динамике»')
 
     p = _changes(plt, sns, ctx['kpis'], out_dir, title=f'Поиск: что изменилось {vs}')
@@ -646,10 +743,18 @@ def build_seo(ctx, out_dir):
 
     if t.get('entry'):
         mets, rows, was = t['entry']
-        top = [(r[0][0], r[1][0]) for r in rows if r[1][0]][:10]
-        if len(top) >= 2:
+        top = [r for r in rows if r[1][0]][:10]
+        ids = [m[0] for m in mets]
+        labels = [_short(r[0][0], site=ctx['site']) for r in top]
+        if len(top) >= 2 and ctx.get('focus') and 'ym:s:sumGoalReachesAny' in ids:
+            ri, ci = ids.index('ym:s:sumGoalReachesAny'), ids.index('ym:s:anyGoalConversionRate')
+            charts['entry'] = ('Страницы входа из поиска', _pair(
+                plt, sns, labels, [r[1][0] for r in top], [r[1][ri] for r in top], [r[1][ci] for r in top],
+                'Страницы входа из поиска — топ-10', out_dir, 'entry', goal_label=lbl('Достижения целей')),
+                'Лист «Страницы входа из поиска»')
+        elif len(top) >= 2:
             charts['entry'] = ('Страницы входа из поиска', _bars(
-                plt, sns, [_short(x[0], site=ctx['site']) for x in top], [x[1] for x in top],
+                plt, sns, labels, [r[1][0] for r in top],
                 'Страницы входа из поиска — топ-10', out_dir, 'entry'), 'Лист «Страницы входа из поиска»')
         now = {r[0][0]: r[1][0] or 0 for r in rows}
         lost = sorted(((u, pv - now.get(u, 0)) for u, pv in was.items() if pv and pv - now.get(u, 0) > 0),
