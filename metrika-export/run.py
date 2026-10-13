@@ -562,6 +562,54 @@ def build_pages(path, ctx, pics):
     return page
 
 
+NOTICES = []      # предупреждения о периоде — в шапку панели и в Сводку
+
+
+def data_end(cid, d2):
+    """Последний день до d2, за который Метрика отдала полные данные. После сбоев она
+    отстаёт: 12.10.2026 у всех счётчиков были только первые часы 11.10 и пусто за 12.10,
+    а поле data_lag в ответе при этом — ноль. Идём с конца: день меньше трети медианы
+    предыдущей недели — неполный. На маленьких сайтах (медиана меньше 20) не судим."""
+    d0 = d2 - timedelta(days=14)
+    try:
+        rows, _, _, _ = stat(cid, ['ym:s:visits'], ['ym:s:date'], d0.isoformat(), d2.isoformat(), sort='ym:s:date')
+    except QueryError:
+        return d2
+    by_day = {r[0][0]: r[1][0] or 0 for r in rows}
+    days = [d0 + timedelta(days=i) for i in range(15)]
+    vals = [by_day.get(d.isoformat(), 0) for d in days]
+    end = len(days) - 1
+    while end > 7:
+        week = sorted(vals[end - 7:end])
+        median = week[len(week) // 2]
+        if median < 20 or vals[end] >= median / 3:
+            break
+        end -= 1
+    return days[end]
+
+
+def fit_to_data(cid, a, mode, d1, d2, p1, p2):
+    """Сдвигает период на последний полный день, если Метрика ещё не отдала последние
+    (сбой, задержка обработки). Месяц, квартал и явные даты не двигаем — только предупреждаем."""
+    end = data_end(cid, d2)
+    if end >= d2:
+        return d1, d2, p1, p2
+    missing = f'{end + timedelta(days=1):%d.%m}' + ('' if end + timedelta(days=1) == d2 else f'–{d2:%d.%m}')
+    if a.date_from or a.date_to or mode in ('mom', 'qoq'):
+        NOTICES.append(f'Метрика не отдаёт полные данные после {end:%d.%m.%Y} (за {missing} их нет или почти нет) — '
+                       f'похоже на последствия сбоя Яндекса. Конец периода будет выглядеть провалом: '
+                       f'перевыгрузите отчёт позже.')
+    else:
+        shift = d2 - end
+        d1, d2, p1, p2 = d1 - shift, end, p1 - shift, p2 - shift
+        NOTICES.append(f'Метрика не отдаёт полные данные после {end:%d.%m.%Y} (за {missing} их нет или почти нет) — '
+                       f'похоже на последствия сбоя Яндекса. Чтобы конец периода не выглядел провалом, отчёт '
+                       f'сдвинут: {d1:%d.%m}–{d2:%d.%m.%Y}. Когда данные появятся, перевыгрузите — период снова '
+                       f'будет по вчера.')
+    log(f'   ⚠ {NOTICES[-1]}')
+    return d1, d2, p1, p2
+
+
 def humans_note():
     return ' · только люди, без роботов' if HUMANS_ONLY else ' · вместе с роботами'
 
@@ -653,6 +701,7 @@ def cmd_report(a):
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
     set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a)
+    d1, d2, p1, p2 = fit_to_data(cid, a, mode, d1, d2, p1, p2)
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else ORDER
     bad = [k for k in only if k not in REPORTS and k not in SPECIAL]
@@ -759,7 +808,7 @@ def panel_context(counter, site, d1, d2, p1, p2, group, mtot, cur, prev, tables,
             except QueryError as e:
                 log(f'   прошлый период для графика динамики не получен: {e}')
     sampled = [s[0] for s in status if s[3]]
-    warnings = []
+    warnings = list(NOTICES)
     if dynamics and dynamics.get('partial_tail'):
         last = dynamics['dates'][-1]
         warnings.append(f'Данные за {last:%d.%m.%Y}, похоже, неполные: визитов в разы меньше обычного. '
@@ -921,6 +970,10 @@ def write_summary(ws, counter, d1, d2, p1, p2, metrics, cur, prev, sampled, stat
     ws['A2'] = f'Счётчик {counter["id"]}' + (f' · {counter["name"]}' if counter.get('name') else '')
     ws['A3'] = (f'Период: {d1:%d.%m.%Y}–{d2:%d.%m.%Y}'
                 + ('' if no_compare else f' · {prev_name}: {p1:%d.%m.%Y}–{p2:%d.%m.%Y}'))
+    if NOTICES:
+        ws['E3'] = ' '.join(NOTICES)
+        ws['E3'].font = Font(color='8A5A00')
+        ws['E3'].alignment = Alignment(wrap_text=True, vertical='top')
     ws['A4'] = f'Выгружено {datetime.now():%d.%m.%Y %H:%M} через API Метрики' + humans_note() + (
         f' · итоги по выборке {sampled:.0%}' if sampled else '')
     ws.append([])
@@ -1128,6 +1181,7 @@ def cmd_direct(a):
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
     set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a)
+    d1, d2, p1, p2 = fit_to_data(cid, a, mode, d1, d2, p1, p2)
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else DIRECT_ORDER
     bad = [k for k in only if k not in DIRECT_REPORTS and k not in DIRECT_SPECIAL]
@@ -1350,7 +1404,7 @@ def cmd_direct(a):
                    'goal_options': all_goal_options(cid), 'focus': bool(FOCUS_GOALS),
                    'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
-                   'xlsx_name': out_file.name, 'warnings': [cost_note] if cost_note else [],
+                   'xlsx_name': out_file.name, 'warnings': NOTICES + ([cost_note] if cost_note else []),
                    'sampled_note': ('По выборке: ' + ', '.join(s[0] for s in status if s[3]) + '.')
                    if any(s[3] for s in status) else ''}
             if 'dynamics' in tables:
@@ -1581,6 +1635,7 @@ def cmd_seo(a):
     cid, site = counter['id'], counter.get('site') or counter.get('name') or ''
     set_focus_goal(cid, getattr(a, 'goal', None), required=a.cmd in ('seo', 'direct'))
     d1, d2, p1, p2, mode = pick_periods(a, 'yoy')
+    d1, d2, p1, p2 = fit_to_data(cid, a, mode, d1, d2, p1, p2)
     prev_name = COMPARE[mode][1]
     days = (d2 - d1).days + 1
     only = [k.strip() for k in a.only.split(',')] if a.only else SEO_ORDER
@@ -1600,7 +1655,7 @@ def cmd_seo(a):
     wb = Workbook()
     summary = wb.active
     summary.title = 'Сводка'
-    status, tables, goal_src, warnings = [], {}, {}, []
+    status, tables, goal_src, warnings = [], {}, {}, list(NOTICES)
     mtot = M_SESSION + M_GOALS
     mids = [m[0] for m in mtot]
     try:
