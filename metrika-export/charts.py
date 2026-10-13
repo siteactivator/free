@@ -839,7 +839,7 @@ SWITCH_JS = """
   const box = document.querySelector('.switch');
   if (!box) return;
   const st = box.querySelector('.sst'), bar = box.querySelector('.sbar i');
-  const buttons = box.querySelectorAll('button, select');
+  const buttons = box.querySelectorAll('button, input');
   if (!box.dataset.cid) return;
   if (location.protocol === 'file:') {
     buttons.forEach(b => b.disabled = true);
@@ -871,13 +871,23 @@ SWITCH_JS = """
     poll(m, g);
   }
   box.addEventListener('click', e => {
-    const b = e.target.closest('button');
+    const b = e.target.closest('button[data-mode]');
     if (!b) return;
-    box.querySelectorAll('button').forEach(x => x.classList.toggle('on', x === b));
+    box.querySelectorAll('button[data-mode]').forEach(x => x.classList.toggle('on', x === b));
     run(b.dataset.mode, box.dataset.goal);
   });
-  const sel = box.querySelector('select');
-  if (sel) sel.addEventListener('change', () => run(box.dataset.mode, sel.value));
+  // главные цели: до пяти галочек, «Пересчитать» — отчёт по ним
+  const checks = box.querySelectorAll('.glist input');
+  checks.forEach(c => c.addEventListener('change', () => {
+    if ([...checks].filter(x => x.checked).length > 5) { c.checked = false; st.textContent = 'не больше 5 целей'; }
+  }));
+  const apply = box.querySelector('.gapply');
+  if (apply) apply.addEventListener('click', () => {
+    const ids = [...checks].filter(x => x.checked).map(x => x.value);
+    if (!ids.length) { st.textContent = 'выберите хотя бы одну цель'; return; }
+    box.querySelector('details').open = false;
+    run(box.dataset.mode, ids.join(','));
+  });
 })();
 """
 
@@ -916,10 +926,17 @@ def html_dashboard(path, ctx, charts):
     if sw:
         modes = [('yoy', 'Год к году'), ('mom', 'Месяц к месяцу'), ('qoq', 'Квартал к кварталу')]
         goal = str(sw.get('goal') or '')
-        opts = ''.join(f'<option value="{gid}"{" selected" if str(gid) == goal else ""}>'
-                       f'{_html.escape(_short(name, 60))}</option>' for gid, name in ctx.get('goal_options') or [])
-        pick = (f'<label class="goalsel">Главная цель: <select>{opts}'
-                f'</select></label>' if opts else '')
+        chosen = goal.split(',') if goal else []
+        options = ctx.get('goal_options') or []
+        names = [name for gid, name in options if str(gid) in chosen]
+        boxes = ''.join(f'<label><input type="checkbox" value="{gid}"{" checked" if str(gid) in chosen else ""}>'
+                        f'{_html.escape(_short(name, 70))}</label>' for gid, name in options)
+        title = (_html.escape(_short(names[0], 40)) + (f' и ещё {len(names) - 1}' if len(names) > 1 else '')
+                 if names else 'не выбрана')
+        pick = (f'<details class="goalsel"><summary>{"Главная цель" if len(names) < 2 else "Главные цели"}: '
+                f'<b>{title}</b></summary><div class="glist">{boxes}<div class="gfoot"><span>до 5 целей; '
+                f'несколько — достижения и конверсия суммой</span><button type="button" class="gapply">'
+                f'Пересчитать</button></div></div></details>' if boxes else '')
         switch = (f'<div class="switch" data-cid="{sw["cid"]}" data-kind="{sw["kind"]}" '
                   f'data-mode="{sw["mode"]}" data-goal="{goal}"><span>Сравнить:</span>'
                   + ''.join(f'<button data-mode="{m}"{" class=on" if m == sw["mode"] else ""}>{label}</button>'
@@ -972,9 +989,18 @@ h2.sec:first-child{{border-top:0;margin-top:22px;padding-top:0}}
 .sbar{{width:180px;height:6px;border-radius:3px;background:var(--line);overflow:hidden;display:none}}
 .sbar i{{display:block;height:100%;width:0;background:#2a78d6;transition:width .6s}}
 .switch.busy .sbar{{display:block}} .sst{{font-size:13px;color:var(--ink2)}}
-.goalsel{{display:inline-flex;align-items:center;gap:6px;color:var(--ink2);font-size:14px;margin-left:8px}}
-.goalsel select{{padding:6px 8px;border:1px solid var(--line);border-radius:8px;background:var(--surface);
-  font:14px system-ui,-apple-system,"Segoe UI",sans-serif;max-width:340px}}
+.goalsel{{position:relative;margin-left:8px;font-size:14px;color:var(--ink2)}}
+.goalsel summary{{cursor:pointer;list-style:none;padding:6px 12px;border:1px solid var(--line);border-radius:8px;
+  background:var(--surface);max-width:420px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}}
+.goalsel summary::after{{content:' ▾';color:var(--muted)}} .goalsel b{{color:var(--ink);font-weight:600}}
+.glist{{position:absolute;z-index:5;top:110%;left:0;width:440px;max-height:380px;overflow:auto;background:#fff;
+  border:1px solid var(--line);border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.12);padding:8px}}
+.glist label{{display:flex;gap:8px;align-items:flex-start;padding:5px 6px;border-radius:6px;color:var(--ink);cursor:pointer}}
+.glist label:hover{{background:#eef4fc}} .glist input{{margin-top:3px}}
+.gfoot{{position:sticky;bottom:-8px;background:#fff;display:flex;gap:10px;align-items:center;
+  justify-content:space-between;padding:8px 6px 4px;border-top:1px solid var(--line);margin-top:6px}}
+.gfoot span{{font-size:12px;color:var(--muted)}}
+.gapply{{padding:7px 14px;border-radius:8px;border:0;background:#2a78d6;color:#fff;font-weight:600;cursor:pointer}}
 .pdfbtn{{margin-left:auto;padding:7px 14px;border-radius:8px;border:1px solid #2a78d6;color:#2a78d6;
   font:600 14px system-ui,-apple-system,"Segoe UI",sans-serif;text-decoration:none}}
 .pdfbtn:hover{{background:#eef4fc}}

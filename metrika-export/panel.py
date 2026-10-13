@@ -80,10 +80,14 @@ li>span{display:block;color:var(--muted);font-size:13.5px} .site{font-size:18px;
 .who .goal b{color:var(--ink);font-weight:600}
 .picker{grid-column:1/-1;display:flex;flex-wrap:wrap;gap:8px 14px;align-items:center;background:#eef4fc;
   border:1px solid #c9dcf4;border-radius:10px;padding:10px 12px}
-.picker label{display:flex;gap:8px;align-items:center;font-weight:600;font-size:14px}
-.picker select{max-width:560px;padding:7px 9px;border:1px solid var(--line);border-radius:8px;background:#fff;
-  font:14px system-ui,-apple-system,"Segoe UI",sans-serif}
-.picker .hint{color:var(--ink2);font-size:12.5px;flex:1 1 300px}
+.picker{flex-direction:column;align-items:stretch}
+.ptitle{font-size:13px;color:var(--ink2)}
+.plist{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:2px 12px;max-height:300px;
+  overflow:auto;background:#fff;border:1px solid var(--line);border-radius:8px;padding:6px}
+.plist label{display:flex;gap:8px;align-items:flex-start;padding:4px 6px;border-radius:6px;cursor:pointer;font-size:14px}
+.plist label:hover{background:#eef4fc} .plist input{margin-top:3px} .plist i{color:var(--muted);font-style:normal;font-size:12px}
+.pfoot{display:flex;justify-content:flex-end;align-items:center;gap:12px} .pmsg{color:var(--bad);font-size:13px}
+.pok{padding:8px 16px;border-radius:8px;border:0;background:var(--accent);color:#fff;font-weight:600;cursor:pointer}
 @media (max-width:640px){.ctr{grid-template-columns:1fr}.acts{justify-content:flex-start}.act{width:100%}}
 """
 
@@ -96,13 +100,20 @@ async function api(path, body) {
   return r.json();
 }
 const esc = t => String(t).replace(/[&<>"]/g, c => ({'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;'}[c]));
-// главная цель счётчика запоминается в браузере: выбрали один раз — дальше кнопка сразу строит отчёт
-function goalOf(cid) { try { return JSON.parse(localStorage.getItem('goal:' + cid) || 'null'); } catch (e) { return null; } }
+// главные цели счётчика запоминаются в браузере: [[номер, название], …] — выбрали один раз,
+// дальше кнопка сразу строит отчёт
+function goalOf(cid) {
+  let g = null;
+  try { g = JSON.parse(localStorage.getItem('goal:' + cid) || 'null'); } catch (e) {}
+  if (g && !Array.isArray(g[0])) g = [g];            // раньше хранилась одна цель
+  return g && g.length ? g : null;
+}
+const goalKey = g => g ? g.map(x => x[0]).join(',') : '';
 function remember(cid, g) { try { localStorage.setItem('goal:' + cid, JSON.stringify(g)); } catch (e) {} showGoal(cid); }
 function showGoal(cid) {
   const li = document.getElementById('c' + cid), g = goalOf(cid);
-  if (li) li.querySelector('.goal').innerHTML =
-    g ? 'Главная цель: <b>' + esc(g[1]) + '</b> · <a href="#" class="chg">сменить</a>' : '';
+  if (li) li.querySelector('.goal').innerHTML = g ? (g.length > 1 ? 'Главные цели: ' : 'Главная цель: ') +
+    g.map(x => '<b>' + esc(x[1]) + '</b>').join(', ') + ' · <a href="#" class="chg">сменить</a>' : '';
 }
 function paint(el, job) {
   el.classList.remove('run', 'wait', 'err');
@@ -124,7 +135,7 @@ async function poll() {
   let busy = false;
   document.querySelectorAll('.act').forEach(el => {
     const g = goalOf(el.dataset.cid);
-    const job = jobs[[el.dataset.cid, el.dataset.kind, '', g ? g[0] : ''].join(':')];
+    const job = jobs[[el.dataset.cid, el.dataset.kind, '', goalKey(g)].join(':')];
     paint(el, job);
     if (job && (job.state === 'running' || job.state === 'queued')) busy = true;
   });
@@ -151,16 +162,24 @@ async function picker(li, kind) {
     if (kind) start(li.querySelector('.act[data-kind="' + kind + '"]'), '');
     return;
   }
-  box.innerHTML = '<label>Главная цель: <select><option value="">— выберите —</option>' +
-    list.map(g => '<option value="' + g[0] + '">' + esc(g[1]) + (g[2] ? ' · ' + esc(g[2]) : '') + '</option>').join('') +
-    '</select></label><span class="hint">По ней считаются конверсия и цена цели. Заявки, покупки и звонки — ' +
-    'сверху; цели вовлечённости («3 страницы», «время на сайте») искажают данные.</span>';
-  box.querySelector('select').addEventListener('change', ev => {
-    const g = list.find(x => String(x[0]) === ev.target.value);
-    if (!g) return;
-    remember(cid, [g[0], g[1]]);
+  const was = goalKey(goalOf(cid)).split(',');
+  box.innerHTML = '<div class="ptitle">Главные цели — по ним считаются конверсия и цена цели. Заявки, покупки ' +
+    'и звонки — сверху; цели вовлечённости («3 страницы», «время на сайте») искажают данные. До 5 целей.</div>' +
+    '<div class="plist">' + list.map(g => '<label><input type="checkbox" value="' + g[0] + '"' +
+      (was.includes(String(g[0])) ? ' checked' : '') + '>' + esc(g[1]) +
+      (g[2] ? ' <i>' + esc(g[2]) + '</i>' : '') + '</label>').join('') + '</div>' +
+    '<div class="pfoot"><span class="pmsg"></span><button type="button" class="pok">' +
+    (kind ? 'Сформировать отчёт' : 'Запомнить') + '</button></div>';
+  const checks = box.querySelectorAll('.plist input'), msg = box.querySelector('.pmsg');
+  checks.forEach(c => c.addEventListener('change', () => {
+    if ([...checks].filter(x => x.checked).length > 5) { c.checked = false; msg.textContent = 'не больше 5 целей'; }
+  }));
+  box.querySelector('.pok').addEventListener('click', () => {
+    const g = list.filter(x => [...checks].some(c => c.checked && c.value === String(x[0]))).map(x => [x[0], x[1]]);
+    if (!g.length) { msg.textContent = 'выберите хотя бы одну цель'; return; }
+    remember(cid, g);
     box.remove();
-    if (kind) start(li.querySelector('.act[data-kind="' + kind + '"]'), g[0]);
+    if (kind) start(li.querySelector('.act[data-kind="' + kind + '"]'), goalKey(g));
     poll();
   });
 }
@@ -170,7 +189,7 @@ document.addEventListener('click', e => {
   const btn = e.target.closest('.act button');
   if (!btn) return;
   const el = btn.closest('.act'), g = goalOf(el.dataset.cid);
-  if (g) start(el, g[0]); else picker(el.closest('.ctr'), el.dataset.kind);
+  if (g) start(el, goalKey(g)); else picker(el.closest('.ctr'), el.dataset.kind);
 });
 const q = document.getElementById('q'), onlyDirect = document.getElementById('od');
 function filter() {
@@ -438,7 +457,7 @@ def serve(a, core):
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
                 cid, kind, mode = str(int(body['cid'])), body['kind'], body.get('mode') or ''
                 goal = str(body.get('goal') or '')
-                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq') and (goal == '' or goal.isdigit())
+                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq') and re.fullmatch(r'(\d+(,\d+){0,4})?', goal)
             except (ValueError, KeyError, AssertionError, TypeError):
                 return self.send('{"error": "bad request"}', 'application/json', 400)
             job = start(cid, kind, mode, goal)

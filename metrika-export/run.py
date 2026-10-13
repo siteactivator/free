@@ -137,7 +137,9 @@ HUMANS_ONLY = True
 # Главная цель (--goal): вместо «любой цели» достижения и конверсия везде считаются по
 # ней — и цена цели в сегментах тоже. Цели вовлечённости («3 страницы») иначе делают
 # конверсию 80–90 % и цену цели в рублях — бессмысленной
-FOCUS_GOAL = None        # (номер, название)
+FOCUS_GOALS = []         # [(номер, название)] — до пяти: по две метрики на цель, в запросе до 20
+MAX_GOALS = 5
+GOAL_ANY = ('ym:s:sumGoalReachesAny', 'ym:s:anyGoalConversionRate')
 
 
 def log(*a):
@@ -216,16 +218,36 @@ def api_get(path, params=None):
 
 
 def stat(counter, metrics, dims, d1, d2, top=TOP, sort=None, extra=None, ids=False):
+    """Как _stat, но «любая цель» — это главные цели (--goal). Одна цель — её метрики
+    вместо «любой»; несколько — их метрики в запросе и сумма в ответе: достижения
+    складываются точно, конверсии — тоже суммой (визит с двумя целями — дважды)."""
+    if not (FOCUS_GOALS and metrics and metrics[0].startswith('ym:s:') and any(m in GOAL_ANY for m in metrics)):
+        return _stat(counter, metrics, dims, d1, d2, top, sort, extra, ids)
+    gids = [g for g, _ in FOCUS_GOALS]
+    if len(gids) == 1:
+        swap = {GOAL_ANY[0]: f'ym:s:goal{gids[0]}reaches', GOAL_ANY[1]: f'ym:s:goal{gids[0]}conversionRate'}
+        return _stat(counter, [swap.get(m, m) for m in metrics], dims, d1, d2, top, sort, extra, ids)
+    base = [m for m in metrics if m not in GOAL_ANY]
+    more = [f'ym:s:goal{g}{part}' for g in gids for part in ('reaches', 'conversionRate')]
+    rows, totals, sampled, total_rows = _stat(counter, base + more, dims, d1, d2, top, sort, extra, ids)
+
+    def fold(vals):
+        if not vals:
+            return vals
+        head, tail = iter(vals[:len(base)]), vals[len(base):]
+        reach = sum(tail[2 * i] or 0 for i in range(len(gids)))
+        conv = sum(tail[2 * i + 1] or 0 for i in range(len(gids)))
+        return [reach if m == GOAL_ANY[0] else conv if m == GOAL_ANY[1] else next(head) for m in metrics]
+    return [(d, fold(v)) for d, v in rows], fold(totals), sampled, total_rows
+
+
+def _stat(counter, metrics, dims, d1, d2, top=TOP, sort=None, extra=None, ids=False):
     """Отчёт /stat/v1/data со страницами. Слишком сложный — повтор, потом выборка.
 
     Возвращает строки [(значения группировок, значения метрик)], итоги и пометку
     о выборке: None — данные полные, иначе доля выборки. extra — добавочные
     параметры запроса (filters, direct_client_logins); ids=True — значения
     группировок парами (название, id): номер кампании Директа и т. п."""
-    if FOCUS_GOAL and metrics and metrics[0].startswith('ym:s:'):
-        g = FOCUS_GOAL[0]
-        metrics = [f'ym:s:goal{g}reaches' if m == 'ym:s:sumGoalReachesAny' else
-                   f'ym:s:goal{g}conversionRate' if m == 'ym:s:anyGoalConversionRate' else m for m in metrics]
     accuracies = ['full'] * (1 + COMPLEX_RETRIES) + list(SAMPLED_FALLBACK)
     last = None
     for i, acc in enumerate(accuracies):
@@ -456,11 +478,12 @@ def goal_choices(cid):
 
 
 def set_focus_goal(cid, arg, required=False):
-    """--goal: номер цели или часть названия. Возвращает (номер, название) или None.
+    """--goal: номер цели или часть названия; несколько — через запятую, до пяти.
+    Возвращает [(номер, название)] — пустой, если цель не задана.
 
     required — для SEO и Директа: без главной цели конверсию и цену цели «делают» цели
     вовлечённости, и цифры вводят в заблуждение. Целей в счётчике нет — отчёт и без неё."""
-    global FOCUS_GOAL
+    global FOCUS_GOALS
     if not arg:
         if required:
             choices = goal_choices(cid)
@@ -468,23 +491,36 @@ def set_focus_goal(cid, arg, required=False):
                 lines = '\n'.join(f'  {gid:>12}  {name} ({kind})' for gid, name, kind in choices[:60])
                 sys.exit('Выберите главную цель — по ней считаются конверсия и цена цели. Без неё цели\n'
                          'вовлечённости («3 страницы», «время на сайте») искажают данные. Добавьте к команде\n'
-                         f'--goal <номер> (или часть названия). Цели счётчика, заявки и покупки — сверху:\n\n{lines}')
-        return None
+                         f'--goal <номер> (или часть названия; несколько — через запятую). Цели счётчика,\n'
+                         f'заявки и покупки — сверху:\n\n{lines}')
+        return []
     goals = api_get(f'/management/v1/counter/{cid}/goals').get('goals') or []
-    hit = ([g for g in goals if str(g['id']) == str(arg)]
-           or [g for g in goals if str(arg).lower() in (g.get('name') or '').lower()])
-    if len(hit) != 1:
-        names = '\n'.join(f'  {g["id"]}  {g.get("name")}' for g in (hit or goals)[:40])
-        sys.exit(f'Цель «{arg}» ' + ('не найдена' if not hit else 'подходит не одна') +
-                 f'. Укажите номер:\n{names}')
-    FOCUS_GOAL = (hit[0]['id'], hit[0].get('name') or str(hit[0]['id']))
-    charts.RELABEL.update({'Достижения целей': 'Достижения цели', 'Конверсия в любую цель, %': 'Конверсия в цель, %'})
-    log(f'   главная цель: «{FOCUS_GOAL[1]}» (№ {FOCUS_GOAL[0]})')
-    return FOCUS_GOAL
+    chosen = []
+    for part in (x.strip() for x in str(arg).split(',') if x.strip()):
+        hit = ([g for g in goals if str(g['id']) == part]
+               or [g for g in goals if part.lower() in (g.get('name') or '').lower()])
+        if len(hit) != 1:
+            names = '\n'.join(f'  {g["id"]}  {g.get("name")}' for g in (hit or goals)[:40])
+            sys.exit(f'Цель «{part}» ' + ('не найдена' if not hit else 'подходит не одна') +
+                     f'. Укажите номер:\n{names}')
+        if all(hit[0]['id'] != g for g, _ in chosen):
+            chosen.append((hit[0]['id'], hit[0].get('name') or str(hit[0]['id'])))
+    if len(chosen) > MAX_GOALS:
+        sys.exit(f'Главных целей — не больше {MAX_GOALS}: у API лимит 20 метрик в запросе, по две на цель.')
+    FOCUS_GOALS = chosen
+    charts.RELABEL.update({'Достижения целей': 'Достижения цели', 'Конверсия в любую цель, %': 'Конверсия в цель, %'}
+                          if len(chosen) == 1 else
+                          {'Конверсия в любую цель, %': 'Конверсия в выбранные цели (сумма), %'})
+    log('   ' + ('главная цель: ' if len(chosen) == 1 else 'главные цели: ')
+        + ', '.join(f'«{name}» (№ {gid})' for gid, name in chosen))
+    return chosen
 
 
 def goal_note():
-    return f' · главная цель: «{FOCUS_GOAL[1]}»' if FOCUS_GOAL else ''
+    if not FOCUS_GOALS:
+        return ''
+    return (' · главная цель: ' if len(FOCUS_GOALS) == 1 else ' · главные цели: ') + ', '.join(
+        f'«{name}»' for _, name in FOCUS_GOALS)
 
 
 def goal_options(*sources):
@@ -1285,7 +1321,7 @@ def cmd_direct(a):
                    'meta': f'счётчик {cid} · только реклама в Директе{humans_note()}{goal_note()}',
                    'vs': COMPARE[mode][2],
                    'switch': {'cid': cid, 'kind': 'direct', 'mode': mode,
-                              'goal': str(FOCUS_GOAL[0]) if FOCUS_GOAL else ''},
+                              'goal': ','.join(str(g) for g, _ in FOCUS_GOALS)},
                    'goal_options': goal_options(goal_src, goal_src_utm),
                    'prev_label': COMPARE[mode][1], 'cur_label': 'этот год' if mode == 'yoy' else 'текущий период',
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
@@ -1639,7 +1675,7 @@ def cmd_seo(a):
                    'prev_label': prev_name, 'cur_label': 'этот год' if mode == 'yoy' else 'сейчас',
                    'step': 'дням' if mode == 'mom' else 'неделям',
                    'switch': {'cid': cid, 'kind': 'seo', 'mode': mode,
-                              'goal': str(FOCUS_GOAL[0]) if FOCUS_GOAL else ''},
+                              'goal': ','.join(str(g) for g, _ in FOCUS_GOALS)},
                    'goal_options': goal_options(goal_src),
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
                    'xlsx_name': out_file.name, 'warnings': warnings, 'long_norm': LONG_NORM, 'vs': COMPARE[mode][2],
