@@ -14,13 +14,15 @@
   python rescue.py fast   --root "/disk/Фото" [--dirs ...] [--no-video]
   python rescue.py slow   --root "/disk/Фото" [--dirs ...]
   python rescue.py all    --root "/disk/Фото" [--dirs ...] [--no-video]
+  python rescue.py verify --root "/disk/Фото"            сверить MD5 скачанного с Яндексом
   python rescue.py stats  --root "/disk/Фото" [--dirs ...]
   python rescue.py start all --root "/disk/Фото"         то же в фоне, окно можно закрыть
   python rescue.py status | stop
 """
-import argparse, json, os, random, re, signal, subprocess, sys, time
+import argparse, hashlib, json, os, random, re, signal, subprocess, sys, time
 from collections import Counter, defaultdict
 from datetime import datetime
+from urllib.parse import parse_qs, urlparse
 
 try:
     sys.stdout.reconfigure(encoding='utf-8', line_buffering=True)
@@ -28,11 +30,9 @@ try:
 except Exception:
     pass
 
-os.environ.setdefault('NODE_OPTIONS', '--no-deprecation')   # тишина от служебного node Playwright
-
 try:
     import requests
-    from playwright.sync_api import sync_playwright
+    import websocket
 except ImportError:
     sys.exit('Не хватает библиотек. Выполните:  pip install -r requirements.txt')
 
@@ -42,14 +42,25 @@ CONFIG = os.path.join(HOME_DIR, 'config.json')
 PREVIEW_DIR = '_превью_1280'
 WORK_DIR_NAME = '_rescue'
 
+# Ключ sk со страницы живёт около суток. Когда он устаревает, Диск отвечает 403 CKEY и
+# присылает новый ключ в поле ckey — подставляем его и повторяем запрос, как делает сам сайт.
 API_JS = """async ([method, params]) => {
     const el = document.getElementById('preloaded-data');
     if (!el) return {status: 0, text: 'NO_PRELOADED_DATA'};
-    const d = JSON.parse(el.textContent);
-    const r = await fetch('/models-v2?m=' + method, {method:'POST', credentials:'include',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({sk: d.config.sk, apiMethod: method, requestParams: params})});
-    return {status: r.status, text: (await r.text())};
+    if (!window.__yadiskRescueSk) window.__yadiskRescueSk = JSON.parse(el.textContent).config.sk;
+    for (let i = 0; i < 2; i++) {
+        const r = await fetch('/models-v2?m=' + method, {method:'POST', credentials:'include',
+            headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({sk: window.__yadiskRescueSk, apiMethod: method, requestParams: params})});
+        const text = await r.text();
+        if (r.status === 403 && i === 0) {
+            try {
+                const e = JSON.parse(text).error;
+                if (e && e.code === 'CKEY' && e.ckey) { window.__yadiskRescueSk = e.ckey; continue; }
+            } catch (_) {}
+        }
+        return {status: r.status, text: text};
+    }
 }"""
 
 WHO_JS = """() => {
@@ -100,11 +111,15 @@ def log(msg):
 
 def fix_root(root):
     """'/disk/Фото', 'disk/Фото', 'Фото' → '/disk/Фото'. Чинит путь, испорченный Git Bash
-    ('C:/Program Files/Git/disk/Фото')."""
+    ('C:/Program Files/Git/disk/Фото'). '/photounlim' — безлимитные фото с телефона
+    (раздел «Фото» на сайте), хранятся отдельно от «Файлов»."""
     root = root.replace('\\', '/').strip()
-    i = root.find('/disk')
-    if i > 0 and ':' in root[:i]:
-        root = root[i:]
+    for top in ('/disk', '/photounlim'):
+        i = root.find(top)
+        if i > 0 and ':' in root[:i]:
+            root = root[i:]
+    if root.lstrip('/').startswith('photounlim'):
+        return '/' + root.strip('/')
     if root.startswith('disk/') or root == 'disk':
         root = '/' + root
     if not root.startswith('/disk'):
@@ -143,6 +158,26 @@ def local_path(disk_path, *sub):
     return path
 
 
+SPLIT_MB = None   # --split-size: раскладывать файлы по размеру в две подпапки (хранится в state)
+
+
+def size_folder(info):
+    if not SPLIT_MB or info.get('size') is None:
+        return None
+    if info['size'] >= SPLIT_MB * 1e6:
+        return f'большие (от {SPLIT_MB:g} МБ)'
+    return f'маленькие (до {SPLIT_MB:g} МБ)'
+
+
+def file_path(disk_path, info, *sub):
+    """Куда сохранить файл: как на Диске, а при --split-size — ещё и в подпапку по размеру."""
+    path = local_path(disk_path, *sub)
+    sf = size_folder(info)
+    if sf:
+        path = os.path.join(os.path.dirname(path), sf, os.path.basename(path))
+    return path
+
+
 def set_time(path, info):
     ts = info.get('etime') or info.get('mtime')
     if ts:
@@ -169,9 +204,13 @@ def check_block(resp, what):
 # ---------------------------------------------------------------- вкладка Диска
 
 class Tab:
-    def __init__(self, pw):
-        self.pw = pw
-        self.browser = None
+    """Связь только с вкладкой Диска — через её собственный канал отладки (CDP).
+    Другие вкладки браузера не трогаем: зависшая чужая вкладка не мешает работе."""
+
+    def __init__(self):
+        self.ws = None
+        self.msg_id = 0
+        self.url = ''
         self.api_errors = 0
         self._find(wait=False)
 
@@ -179,30 +218,55 @@ class Tab:
         """Найти вкладку disk.yandex.*/client. При обрыве — ждать до 30 минут."""
         for _ in range(60 if wait else 1):
             try:
-                if self.browser is None or not self.browser.is_connected():
-                    self.browser = self.pw.chromium.connect_over_cdp(f'http://127.0.0.1:{PORT}')
-                pages = [pg for c in self.browser.contexts for pg in c.pages
-                         if 'disk.yandex.' in pg.url and '/client/' in pg.url]
+                if self.ws:
+                    self.ws.close()
+                self.ws = None
+                with requests.get(f'http://127.0.0.1:{PORT}/json/list', timeout=10) as r:
+                    targets = r.json()
+                pages = [t for t in targets if t.get('type') == 'page'
+                         and 'disk.yandex.' in t.get('url', '') and '/client/' in t.get('url', '')
+                         and t.get('webSocketDebuggerUrl')]
                 if pages:
-                    self.page = pages[0]
+                    self.ws = websocket.create_connection(pages[0]['webSocketDebuggerUrl'],
+                                                          timeout=180, suppress_origin=True)
+                    self.url = pages[0]['url']
                     return
-                msg = 'в Chrome нет вкладки Яндекс Диска (адрес disk.yandex.ru/client/...)'
+                msg = 'в браузере нет вкладки Яндекс Диска (адрес disk.yandex.ru/client/...)'
             except Exception as e:
-                self.browser = None
-                msg = f'Chrome на порту {PORT} недоступен ({type(e).__name__}) — запустите start_chrome.py'
+                self.ws = None
+                msg = f'браузер на порту {PORT} недоступен ({type(e).__name__}) — запустите start_chrome.py'
             if not wait:
                 raise Stop(msg)
             log(msg + ' — жду 30 с')
             time.sleep(30)
         raise Stop('вкладка Диска не появилась за 30 минут')
 
+    def _send(self, method, params=None):
+        self.msg_id += 1
+        my_id = self.msg_id
+        self.ws.send(json.dumps({'id': my_id, 'method': method, 'params': params or {}}))
+        while True:
+            msg = json.loads(self.ws.recv())
+            if msg.get('id') == my_id:
+                if 'error' in msg:
+                    raise RuntimeError(f'{method}: {msg["error"]}')
+                return msg.get('result', {})
+
+    def evaluate(self, fn, arg=None):
+        """Выполнить JS-функцию во вкладке Диска и вернуть результат."""
+        expr = f'({fn})({json.dumps(arg, ensure_ascii=False)})' if arg is not None else f'({fn})()'
+        r = self._send('Runtime.evaluate', {'expression': expr, 'awaitPromise': True, 'returnByValue': True})
+        if 'exceptionDetails' in r:
+            raise RuntimeError(r['exceptionDetails'].get('text', 'ошибка JS'))
+        return r.get('result', {}).get('value')
+
     def who(self):
-        return self.page.evaluate(WHO_JS)
+        return self.evaluate(WHO_JS)
 
     def call(self, method, params):
         for attempt in range(6):
             try:
-                r = self.page.evaluate(API_JS, [method, params])
+                r = self.evaluate(API_JS, [method, params])
             except Exception as e:
                 log(f'{method}: {type(e).__name__} {str(e)[:150]} — повтор через 30 с')
                 time.sleep(30)
@@ -248,9 +312,10 @@ class Tab:
 
     def session(self):
         s = requests.Session()
-        s.headers['User-Agent'] = self.page.evaluate('navigator.userAgent')
+        s.headers['User-Agent'] = self.evaluate('() => navigator.userAgent')
         s.headers['Referer'] = 'https://disk.yandex.ru/'
-        for c in self.page.context.cookies():
+        urls = ['https://disk.yandex.ru/', 'https://downloader.disk.yandex.ru/', 'https://yandex.ru/']
+        for c in self._send('Network.getCookies', {'urls': urls}).get('cookies', []):
             if 'yandex' in c['domain']:
                 s.cookies.set(c['name'], c['value'], domain=c['domain'], path=c['path'])
         return s
@@ -416,39 +481,30 @@ def cmd_check(tab, st, dirs, sample):
             print(f'    {r[0]:40} превью {"живо" if r[1] == 200 else "нет":4}  сервер {r[2]}')
 
 
-def save_previews(tab, s, st, d, paths):
-    """Страховые превью 1280 px для файлов папки d. Пишет f['preview'] = HTTP-код."""
-    need = [p for p in paths if 'preview' not in st['files'][p]]
-    if not need:
-        return
-    try:
-        items = tab.listing(d)
-    except ApiError as e:
-        log(f'превью {d}: список не получен — {e}')
-        return
-    urls = {}
+def save_previews(s, st, items):
+    """Страховые превью 1280 px для файлов из порции списка. Пишет f['preview'] = HTTP-код.
+    Возвращает (сохранено, проверено)."""
+    ok = n = 0
     for x in items:
-        if x['type'] == 'file':
-            big = [u for u in x.get('meta', {}).get('sizes', []) if u['name'] == 'XXXL']
-            if big:
-                u = big[0]['url']
-                urls[x['path']] = 'https:' + u if u.startswith('//') else u
-    ok = 0
-    for p in need:
-        f = st['files'][p]
-        if p not in urls:
+        f = st['files'].get(x.get('path'))
+        if f is None or 'preview' in f:
+            continue
+        n += 1
+        big = [u for u in x.get('meta', {}).get('sizes', []) if u['name'] == 'XXXL']
+        if not big:
             f['preview'] = 0
             continue
+        url = 'https:' + big[0]['url'] if big[0]['url'].startswith('//') else big[0]['url']
         try:
-            r = s.get(urls[p], timeout=(15, 60))
+            r = s.get(url, timeout=(15, 60))
         except requests.exceptions.RequestException as e:
-            log(f'превью {p}: {type(e).__name__}')
+            log(f'превью {x["path"]}: {type(e).__name__}')
             continue
         if r.status_code == 200:
             check_block(r, 'превью')
         f['preview'] = r.status_code
         if r.status_code == 200 and r.content:
-            dst = local_path(p, PREVIEW_DIR)
+            dst = file_path(x['path'], f, PREVIEW_DIR)
             if not dst.lower().endswith(('.jpg', '.jpeg')):
                 dst += '.jpg'
             try:
@@ -458,15 +514,47 @@ def save_previews(tab, s, st, d, paths):
                 set_time(dst, f)
                 ok += 1
             except OSError as e:
-                log(f'превью {p}: не записать на диск — {e}')
+                log(f'превью {x["path"]}: не записать на диск — {e}')
         time.sleep(random.uniform(1, 2.5))
-    save_state(st)
-    log(f'превью {d}: живых {ok} из {len(need)}')
+    if n:
+        save_state(st)
+    return ok, n
+
+
+def iter_pages(tab, d):
+    """Папка порциями по 100 в порядке Диска (по имени, по возрастанию)."""
+    offset = 0
+    while True:
+        data = tab.call('mpfs/resources', {'idContext': d, 'order': 1, 'sort': 'name',
+                                           'offset': offset, 'amount': 100})
+        items = [x for x in data.get('resources', []) if x.get('path') != d]
+        time.sleep(random.uniform(1.5, 3.5))
+        yield items
+        if len(items) < 100:
+            return
+        offset += 100
+
+
+def etag_of(url):
+    """MD5 оригинала, который Яндекс кладёт в ссылку на файл (параметр etag)."""
+    try:
+        e = parse_qs(urlparse(url if '://' in url else 'https:' + url).query).get('etag', [''])[0]
+    except ValueError:
+        return None
+    return e.lower() if re.fullmatch(r'[0-9a-fA-F]{32}', e or '') else None
+
+
+def md5_file(path):
+    h = hashlib.md5()
+    with open(path, 'rb') as fh:
+        for chunk in iter(lambda: fh.read(1 << 20), b''):
+            h.update(chunk)
+    return h.hexdigest()
 
 
 def download_one(tab, s, disk_path, info, read_timeout):
     """(статус, пояснение). Недокачанное остаётся в .part и докачивается с места обрыва."""
-    dst = local_path(disk_path)
+    dst = file_path(disk_path, info)
     os.makedirs(os.path.dirname(dst), exist_ok=True)
     size = info.get('size')
     if os.path.exists(dst) and os.path.getsize(dst) == size:
@@ -475,6 +563,7 @@ def download_one(tab, s, disk_path, info, read_timeout):
     if not link:
         return 'error', 'нет ссылки'
     url = 'https:' + link if link.startswith('//') else link
+    etag = etag_of(url)
     part = dst + '.part'
     have = os.path.getsize(part) if os.path.exists(part) else 0
     if size and have >= size:
@@ -508,9 +597,17 @@ def download_one(tab, s, disk_path, info, read_timeout):
     total = have + got
     if size and total != size:
         return 'partial', f'{total} из {size} байт, сервер {node}'
+    check = ''
+    if etag:
+        md5 = md5_file(part)
+        if md5 != etag:
+            os.remove(part)             # битый файл: в следующий раз качаем заново
+            return 'error', f'MD5 не совпал ({md5} вместо {etag}), сервер {node}'
+        info['md5'] = md5
+        check = ', MD5 ок'
     os.replace(part, dst)
     set_time(dst, info)
-    return 'done', f'{got/1e6:.1f} МБ за {time.time()-t0:.0f}с, сервер {node}'
+    return 'done', f'{got/1e6:.1f} МБ за {time.time()-t0:.0f}с, сервер {node}{check}'
 
 
 def select(st, dirs, no_video, only_video=False):
@@ -526,6 +623,8 @@ def select(st, dirs, no_video, only_video=False):
 
 
 def cmd_download(tab, st, phase, a, only_video=False):
+    """fast: папка порциями по 100 в порядке Диска — превью порции, затем её оригиналы
+    (ранние файлы раньше, свежие ссылки на превью). slow: повтор недокачанного."""
     s = tab.session()
     paths = select(st, a.dirs, a.no_video, only_video)
     if phase == 'fast':
@@ -535,24 +634,21 @@ def cmd_download(tab, st, phase, a, only_video=False):
     by_dir = {}
     for p in sorted(paths):
         by_dir.setdefault(p.rsplit('/', 1)[0], []).append(p)
-    total_done = total_tried = 0
-    for d, dpaths in by_dir.items():
-        if phase == 'fast' and not a.no_preview:
-            save_previews(tab, s, st, d, dpaths)
-        todo = [p for p in dpaths if st['files'][p]['status'] in statuses
-                and st['files'][p].get('tries_' + phase, 0) < a.max_tries]
-        # сначала недокачанные куски, потом файлы с живым превью, потом остальные
-        todo.sort(key=lambda p: (st['files'][p]['status'] != 'partial',
-                                 st['files'][p].get('preview') != 200, p))
-        if a.limit:
-            todo = todo[:max(0, a.limit - total_tried)]
-        if not todo:
-            continue
-        log(f'проход {phase}: {d} — в очереди {len(todo)}')
-        for i, p in enumerate(todo, 1):
+    cnt = {'done': 0, 'tried': 0}
+
+    def eligible(p):
+        f = st['files'][p]
+        return f['status'] in statuses and f.get('tries_' + phase, 0) < a.max_tries
+
+    def run(batch, start_i, total):
+        """Скачать список файлов по одному. False — достигнут --limit."""
+        nonlocal s
+        for i, p in enumerate(batch, start_i):
+            if a.limit and cnt['tried'] >= a.limit:
+                return False
             f = st['files'][p]
             f['tries_' + phase] = f.get('tries_' + phase, 0) + 1
-            if total_tried and total_tried % 300 == 0:
+            if cnt['tried'] and cnt['tried'] % 300 == 0:
                 s = tab.session()
             try:
                 status, note = download_one(tab, s, p, f, read_timeout)
@@ -562,16 +658,82 @@ def cmd_download(tab, st, phase, a, only_video=False):
                 status, note = 'error', f'диск: {e}'
             f['status'], f['note'] = status, note
             save_state(st)
-            total_done += status == 'done'; total_tried += 1
-            log(f'[{phase} {i}/{len(todo)}] {status:7} {p} — {note}')
+            cnt['done'] += status == 'done'; cnt['tried'] += 1
+            log(f'[{phase} {i}/{total}] {status:7} {p} — {note}')
             # после зависшего сервера мы и так простояли read_timeout — короткой паузы хватит
             if status == 'timeout' and 'ReadTimeout' in note:
                 time.sleep(random.uniform(1, 2))
             else:
                 time.sleep(random.uniform(a.pause_min, a.pause_max))
-        if a.limit and total_tried >= a.limit:
+        return True
+
+    for d, dpaths in by_dir.items():
+        todo = [p for p in dpaths if eligible(p)]
+        need_pv = phase == 'fast' and not a.no_preview and any('preview' not in st['files'][p] for p in dpaths)
+        if not todo and not need_pv:
+            continue
+        log(f'проход {phase}: {d} — в очереди {len(todo)}')
+        if phase == 'fast':
+            dset, i = set(dpaths), 1
+            try:
+                for items in iter_pages(tab, d):
+                    page = [x for x in items if x.get('type') == 'file' and x['path'] in dset]
+                    if not a.no_preview and page:
+                        ok, n = save_previews(s, st, page)
+                        if n:
+                            log(f'превью: {ok} живых из {n} ({page[0]["name"]} … {page[-1]["name"]})')
+                    batch = [x['path'] for x in page if eligible(x['path'])]
+                    if not run(batch, i, len(todo)):
+                        break
+                    i += len(batch)
+            except ApiError as e:
+                log(f'{d}: список не получен — {e}')
+        else:
+            # сначала недокачанные куски, потом файлы с живым превью, потом остальные
+            todo.sort(key=lambda p: (st['files'][p]['status'] != 'partial',
+                                     st['files'][p].get('preview') != 200, p))
+            run(todo, 1, len(todo))
+        if a.limit and cnt['tried'] >= a.limit:
             break
-    log(f'проход {phase} закончен: скачано {total_done} из {total_tried}')
+    log(f'проход {phase} закончен: скачано {cnt["done"]} из {cnt["tried"]}')
+
+
+def cmd_verify(tab, st, a):
+    """Сверить MD5 уже скачанных оригиналов с Яндексом. Суммы берутся из списка папки
+    (один запрос на 100 файлов). Несовпавшие помечаются ошибкой — скачаются заново."""
+    paths = [p for p in select(st, a.dirs, a.no_video) if st['files'][p]['status'] == 'done']
+    by_dir = {}
+    for p in paths:
+        by_dir.setdefault(p.rsplit('/', 1)[0], set()).add(p)
+    res = Counter()
+    for d, dset in sorted(by_dir.items()):
+        try:
+            for items in iter_pages(tab, d):
+                for x in items:
+                    p = x.get('path')
+                    if p not in dset:
+                        continue
+                    f = st['files'][p]
+                    orig = [u['url'] for u in x.get('meta', {}).get('sizes', []) if u['name'] == 'ORIGINAL']
+                    etag = etag_of(orig[0]) if orig else None
+                    dst = file_path(p, f)
+                    if not etag:
+                        res['нет суммы у Яндекса'] += 1
+                    elif not os.path.exists(dst):
+                        f['status'], f['note'] = 'error', 'файла нет на диске'
+                        res['файла нет на диске'] += 1
+                    elif md5_file(dst) == etag:
+                        f['md5'] = etag
+                        res['совпало'] += 1
+                    else:
+                        f['status'], f['note'] = 'error', 'MD5 не совпал при проверке'
+                        res['не совпало'] += 1
+                        log(f'verify: MD5 не совпал — {p}')
+        except ApiError as e:
+            log(f'verify {d}: список не получен — {e}')
+        save_state(st)
+        log(f'verify {d}: {dict(res)}')
+    log(f'проверка закончена: {dict(res)}. Несовпавшие скачаются заново в следующем fast.')
 
 
 def cmd_stats(st, dirs=(), no_video=False):
@@ -593,7 +755,7 @@ def cmd_ping(tab):
     who = tab.who()
     if not who:
         sys.exit('Вкладка Диска найдена, но страница ещё не загрузилась — обновите её и повторите.')
-    print(f'Вкладка: {tab.page.url}')
+    print(f'Вкладка: {tab.url}')
     print(f'Аккаунт: {who.get("login")} ({who.get("name")})')
     if who.get('used'):
         print(f'На Диске занято {who["used"]/1e9:.1f} ГБ из {who["limit"]/1e9:.0f} ГБ, файлов {who.get("files")}')
@@ -604,7 +766,7 @@ def cmd_ping(tab):
 
 def cmd_start(argv):
     """Запустить команду фоновым процессом, независимым от окна терминала."""
-    if not argv or argv[0] not in ('index', 'fast', 'slow', 'all'):
+    if not argv or argv[0] not in ('index', 'fast', 'slow', 'all', 'verify'):
         sys.exit('Пример: python rescue.py start all --root "/disk/Фото"')
     refuse_if_running()
     os.makedirs(WORK, exist_ok=True)
@@ -644,7 +806,9 @@ def cmd_status():
     for name in sorted(os.listdir(WORK)) if os.path.isdir(WORK) else []:
         if name.startswith('state_') and name.endswith('.json'):
             with open(os.path.join(WORK, name), encoding='utf-8') as f:
-                cmd_stats(json.load(f))
+                st = json.load(f)
+            if st.get('files'):
+                cmd_stats(st)
 
 
 def cmd_stop():
@@ -661,13 +825,15 @@ def main():
         return cmd_start(sys.argv[2:])
     ap =argparse.ArgumentParser(description='Спасение файлов с Яндекс Диска через вкладку браузера')
     ap.add_argument('cmd', choices=['setup', 'ping', 'index', 'report', 'check', 'fast', 'slow',
-                                    'all', 'stats', 'status', 'stop'])
+                                    'all', 'verify', 'stats', 'status', 'stop'])
     ap.add_argument('--root', default='/disk', help='папка на Диске, например "/disk/Фото"')
     ap.add_argument('--dirs', nargs='*', default=[], help='подпапки внутри --root: "2013" "Отпуск 2015"')
     ap.add_argument('--out', help='setup: куда сохранять файлы')
     ap.add_argument('--port', type=int, help='setup: порт отладки Chrome (по умолчанию 9222)')
     ap.add_argument('--no-video', action='store_true', help='пропустить видео')
     ap.add_argument('--no-preview', action='store_true', help='не сохранять страховые превью 1280 px')
+    ap.add_argument('--no-retry', action='store_true', help='all: без повтора недокачанного в конце')
+    ap.add_argument('--split-size', type=float, help='раскладывать в подпапки «большие»/«маленькие» по размеру, МБ; 0 — выключить')
     ap.add_argument('--pause-min', type=float, default=3, help='пауза между файлами, от, с')
     ap.add_argument('--pause-max', type=float, default=7, help='пауза между файлами, до, с')
     ap.add_argument('--fast-timeout', type=int, default=10, help='fast: сколько ждать ответа сервера, с')
@@ -694,6 +860,11 @@ def main():
 
     a.root = fix_root(a.root)
     st = load_state(a.root)
+    global SPLIT_MB
+    if a.split_size is not None:
+        st['split_mb'] = a.split_size or None
+        save_state(st)
+    SPLIT_MB = st.get('split_mb')
     if a.cmd == 'stats':
         return cmd_stats(st, a.dirs, a.no_video)
     if a.cmd == 'report':
@@ -701,39 +872,43 @@ def main():
     if a.cmd in ('fast', 'slow', 'all') and not st['files']:
         sys.exit(f'Для {a.root} ещё нет списка файлов — сначала: python rescue.py index --root "{a.root}"')
 
-    long_run = a.cmd in ('index', 'fast', 'slow', 'all')
+    long_run = a.cmd in ('index', 'fast', 'slow', 'all', 'verify')
     if long_run:
         take_lock(f'{a.cmd} {a.root} {" ".join(a.dirs)}'.strip())
     try:
-        with sync_playwright() as pw:
-            tab = Tab(pw)
-            if a.cmd == 'ping':
-                return cmd_ping(tab)
-            if a.cmd == 'check':
-                return cmd_check(tab, st, a.dirs, a.sample)
-            log(f'старт: {a.cmd} {a.root} {" ".join(a.dirs)} → {OUT_ROOT}')
-            if a.cmd == 'index':
-                cmd_index(tab, st)
-            elif a.cmd in ('fast', 'slow'):
-                cmd_download(tab, st, a.cmd, a)
-            else:                                   # all: фото → видео → повтор зависших
-                video_wanted = not a.no_video
-                a.no_video = True
-                cmd_download(tab, st, 'fast', a)
-                if video_wanted:
-                    a.no_video = False
-                    cmd_download(tab, st, 'fast', a, only_video=True)
-                    a.no_video = not video_wanted
+        tab = Tab()
+        if a.cmd == 'ping':
+            return cmd_ping(tab)
+        if a.cmd == 'check':
+            return cmd_check(tab, st, a.dirs, a.sample)
+        log(f'старт: {a.cmd} {a.root} {" ".join(a.dirs)} → {OUT_ROOT}')
+        if a.cmd == 'index':
+            cmd_index(tab, st)
+        elif a.cmd == 'verify':
+            cmd_verify(tab, st, a)
+        elif a.cmd in ('fast', 'slow'):
+            cmd_download(tab, st, a.cmd, a)
+        else:                                   # all: фото → видео → повтор зависших
+            video_wanted = not a.no_video
+            a.no_video = True
+            cmd_download(tab, st, 'fast', a)
+            if video_wanted:
+                a.no_video = False
+                cmd_download(tab, st, 'fast', a, only_video=True)
+                a.no_video = not video_wanted
+            if not a.no_retry:
                 cmd_download(tab, st, 'slow', a)
-            cmd_stats(st, a.dirs, a.no_video)
+        cmd_stats(st, a.dirs, a.no_video)
     except Stop as e:
-        save_state(st)
+        if long_run:
+            save_state(st)
         log(f'СТОП: {e}')
         log('Откройте вкладку Диска: если там капча — пройдите её руками, подождите 15–30 минут '
             'и запустите ту же команду снова, она продолжит с места остановки.')
         sys.exit(2)
     except KeyboardInterrupt:
-        save_state(st)
+        if long_run:
+            save_state(st)
         log('остановлено вручную')
     finally:
         if long_run:
