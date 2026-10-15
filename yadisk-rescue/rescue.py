@@ -631,6 +631,8 @@ def cmd_download(tab, st, phase, a, only_video=False):
         read_timeout, statuses = a.fast_timeout, ('new', 'error')
     else:
         read_timeout, statuses = a.slow_timeout, ('timeout', 'partial', 'error')
+    if a.only:
+        statuses = tuple(x for x in statuses if x in a.only)
     by_dir = {}
     for p in sorted(paths):
         by_dir.setdefault(p.rsplit('/', 1)[0], []).append(p)
@@ -839,6 +841,8 @@ def main():
     ap.add_argument('--no-video', action='store_true', help='пропустить видео')
     ap.add_argument('--no-preview', action='store_true', help='не сохранять страховые превью 1280 px')
     ap.add_argument('--no-retry', action='store_true', help='all: без повтора недокачанного в конце')
+    ap.add_argument('--only', nargs='*', choices=['partial', 'timeout', 'error', 'new'],
+                    help='slow/fast: брать только файлы с этими статусами, например --only partial')
     ap.add_argument('--split-size', type=float, help='раскладывать в подпапки «большие»/«маленькие» по размеру, МБ; 0 — выключить')
     ap.add_argument('--pause-min', type=float, default=3, help='пауза между файлами, от, с')
     ap.add_argument('--pause-max', type=float, default=7, help='пауза между файлами, до, с')
