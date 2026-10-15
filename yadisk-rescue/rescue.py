@@ -640,7 +640,10 @@ def cmd_download(tab, st, phase, a, only_video=False):
 
     def eligible(p):
         f = st['files'][p]
-        return f['status'] in statuses and f.get('tries_' + phase, 0) < a.max_tries
+        if f['status'] not in statuses:
+            return False
+        # fast: не больше --max-tries попыток всего; slow: каждый запуск — одна попытка каждому файлу
+        return phase == 'slow' or f.get('tries_fast', 0) < a.max_tries
 
     def run(batch, start_i, total):
         """Скачать список файлов по одному. False — достигнут --limit."""
@@ -848,7 +851,7 @@ def main():
     ap.add_argument('--pause-max', type=float, default=7, help='пауза между файлами, до, с')
     ap.add_argument('--fast-timeout', type=int, default=10, help='fast: сколько ждать ответа сервера, с')
     ap.add_argument('--slow-timeout', type=int, default=60, help='slow: сколько ждать ответа сервера, с')
-    ap.add_argument('--max-tries', type=int, default=3, help='попыток на файл в одном виде прохода')
+    ap.add_argument('--max-tries', type=int, default=3, help='fast: попыток на файл с ошибкой')
     ap.add_argument('--limit', type=int, default=0, help='не больше N файлов (для пробы)')
     ap.add_argument('--sample', type=int, default=40, help='check: сколько файлов проверить в папке, 0 — все')
     a = ap.parse_args()
