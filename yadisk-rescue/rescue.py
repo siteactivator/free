@@ -716,6 +716,12 @@ def cmd_verify(tab, st, a):
                     f = st['files'][p]
                     orig = [u['url'] for u in x.get('meta', {}).get('sizes', []) if u['name'] == 'ORIGINAL']
                     etag = etag_of(orig[0]) if orig else None
+                    if not etag:            # у видео и архивов в списке нет ORIGINAL — берём сумму из ссылки
+                        try:
+                            etag = etag_of(tab.call('mpfs/url', {'path': p}).get('file', ''))
+                        except ApiError:
+                            etag = None
+                        time.sleep(random.uniform(1.5, 2.5))
                     dst = file_path(p, f)
                     if not etag:
                         res['нет суммы у Яндекса'] += 1
