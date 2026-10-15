@@ -10,7 +10,7 @@
   python rescue.py ping                                  есть ли вкладка Диска, кто вошёл
   python rescue.py index  --root "/disk/Фото"            собрать список файлов
   python rescue.py report --root "/disk/Фото"            таблица по папкам: файлов, ГБ, видео
-  python rescue.py check  --root "/disk/Фото" --dirs "2013"   проверка без скачивания
+  python rescue.py check  --root "/disk/Фото" --dirs "Лето 2019"   проверка без скачивания
   python rescue.py fast   --root "/disk/Фото" [--dirs ...] [--no-video]
   python rescue.py slow   --root "/disk/Фото" [--dirs ...]
   python rescue.py all    --root "/disk/Фото" [--dirs ...] [--no-video]
@@ -838,7 +838,7 @@ def main():
     ap.add_argument('cmd', choices=['setup', 'ping', 'index', 'report', 'check', 'fast', 'slow',
                                     'all', 'verify', 'stats', 'status', 'stop'])
     ap.add_argument('--root', default='/disk', help='папка на Диске, например "/disk/Фото"')
-    ap.add_argument('--dirs', nargs='*', default=[], help='подпапки внутри --root: "2013" "Отпуск 2015"')
+    ap.add_argument('--dirs', nargs='*', default=[], help='подпапки внутри --root: "Лето 2019" "Отпуск 2015"')
     ap.add_argument('--out', help='setup: куда сохранять файлы')
     ap.add_argument('--port', type=int, help='setup: порт отладки Chrome (по умолчанию 9222)')
     ap.add_argument('--no-video', action='store_true', help='пропустить видео')

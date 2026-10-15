@@ -93,7 +93,7 @@ python rescue.py report --root "Фото"
 По желанию — оценка одной папки без скачивания:
 
 ```
-python rescue.py check --root "Фото" --dirs "2013" --sample 40
+python rescue.py check --root "Фото" --dirs "Лето 2019" --sample 40
 ```
 
 Пересказать итог словами: сколько превью живо, на каких серверах лежат
@@ -106,7 +106,7 @@ python rescue.py check --root "Фото" --dirs "2013" --sample 40
 Всегда в фоне, чтобы прогон не зависел от сессии:
 
 ```
-python rescue.py start all --root "Фото" [--dirs "2013" "Отпуск 2015"] [--no-video]
+python rescue.py start all --root "Фото" [--dirs "Лето 2019" "Отпуск 2015"] [--no-video]
 ```
 
 `all` = фото по папкам порциями по 100 в порядке имён (превью 1280 сотни →
