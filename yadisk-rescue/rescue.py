@@ -19,7 +19,7 @@
   python rescue.py start all --root "/disk/Фото"         то же в фоне, окно можно закрыть
   python rescue.py status | stop
 """
-import argparse, hashlib, json, os, random, re, signal, subprocess, sys, time
+import argparse, hashlib, json, os, random, re, signal, socket, subprocess, sys, threading, time
 from collections import Counter, defaultdict
 from datetime import datetime
 from urllib.parse import parse_qs, urlparse
@@ -552,6 +552,22 @@ def md5_file(path):
     return h.hexdigest()
 
 
+STALL_WINDOW = 60          # с: за это время должно прийти хотя бы STALL_BYTES,
+STALL_BYTES = 1 << 20      # иначе сервер «отдаёт по капле» — бросаем файл, кусок остаётся в .part
+
+
+def _sock_of(resp):
+    """Сокет ответа requests/urllib3 — чтобы прервать зависшее чтение из другого потока."""
+    for get in (lambda: resp.raw._connection.sock, lambda: resp.raw._fp.fp.raw._sock):
+        try:
+            sk = get()
+            if sk is not None:
+                return sk
+        except Exception:
+            pass
+    return None
+
+
 def download_one(tab, s, disk_path, info, read_timeout):
     """(статус, пояснение). Недокачанное остаётся в .part и докачивается с места обрыва."""
     dst = file_path(disk_path, info)
@@ -568,7 +584,9 @@ def download_one(tab, s, disk_path, info, read_timeout):
     have = os.path.getsize(part) if os.path.exists(part) else 0
     if size and have >= size:
         have = 0
-    t0, got, node = time.time(), 0, '?'
+    t0, node = time.time(), '?'
+    prog = {'got': 0}
+    stalled, finished = threading.Event(), threading.Event()
     try:
         with s.get(url, allow_redirects=False, timeout=(30, 60), stream=True) as h:
             loc = h.headers.get('Location')
@@ -587,13 +605,42 @@ def download_one(tab, s, disk_path, info, read_timeout):
             if r.status_code == 200:
                 check_block(r, 'хранилище')
                 have = 0
-            with open(part, 'ab' if have else 'wb') as fh:
-                for chunk in r.iter_content(256 * 1024):
-                    fh.write(chunk); got += len(chunk)
-    except requests.exceptions.RequestException as e:
-        total = have + got
+
+            def watchdog():
+                mark_t, mark_b = time.time(), 0
+                while not finished.wait(min(5, STALL_WINDOW)):
+                    if time.time() - mark_t < STALL_WINDOW:
+                        continue
+                    if prog['got'] - mark_b < STALL_BYTES:
+                        stalled.set()
+                        try:
+                            sk = _sock_of(r)
+                            if sk is not None:
+                                sk.shutdown(socket.SHUT_RDWR)
+                            else:
+                                r.close()
+                        except Exception:
+                            pass
+                        return
+                    mark_t, mark_b = time.time(), prog['got']
+
+            threading.Thread(target=watchdog, daemon=True).start()
+            try:
+                with open(part, 'ab' if have else 'wb') as fh:
+                    for chunk in r.iter_content(64 * 1024):
+                        fh.write(chunk); prog['got'] += len(chunk)
+            finally:
+                finished.set()
+    except (Stop, ApiError):
+        raise
+    except Exception as e:
+        if not (stalled.is_set() or isinstance(e, requests.exceptions.RequestException)):
+            raise
+        total = have + prog['got']
+        why = 'сервер отдаёт по капле' if stalled.is_set() else type(e).__name__
         return ('partial' if total else 'timeout'), \
-            f'{type(e).__name__}, сервер {node}, {time.time()-t0:.0f}с, есть {total/1e6:.1f} из {(size or 0)/1e6:.1f} МБ'
+            f'{why}, сервер {node}, {time.time()-t0:.0f}с, есть {total/1e6:.1f} из {(size or 0)/1e6:.1f} МБ'
+    got = prog['got']
     total = have + got
     if size and total != size:
         return 'partial', f'{total} из {size} байт, сервер {node}'
@@ -642,6 +689,8 @@ def cmd_download(tab, st, phase, a, only_video=False):
         f = st['files'][p]
         if f['status'] not in statuses:
             return False
+        if a.skip_recent and f.get('last_try', 0) > time.time() - a.skip_recent * 3600:
+            return False
         # fast: не больше --max-tries попыток всего; slow: каждый запуск — одна попытка каждому файлу
         return phase == 'slow' or f.get('tries_fast', 0) < a.max_tries
 
@@ -653,6 +702,7 @@ def cmd_download(tab, st, phase, a, only_video=False):
                 return False
             f = st['files'][p]
             f['tries_' + phase] = f.get('tries_' + phase, 0) + 1
+            f['last_try'] = int(time.time())
             if cnt['tried'] and cnt['tried'] % 300 == 0:
                 s = tab.session()
             try:
@@ -844,6 +894,8 @@ def main():
     ap.add_argument('--no-video', action='store_true', help='пропустить видео')
     ap.add_argument('--no-preview', action='store_true', help='не сохранять страховые превью 1280 px')
     ap.add_argument('--no-retry', action='store_true', help='all: без повтора недокачанного в конце')
+    ap.add_argument('--skip-recent', type=float, default=0,
+                    help='пропускать файлы, которые пробовали меньше N часов назад (продолжить прерванный повтор)')
     ap.add_argument('--only', nargs='*', choices=['partial', 'timeout', 'error', 'new'],
                     help='slow/fast: брать только файлы с этими статусами, например --only partial')
     ap.add_argument('--split-size', type=float, help='раскладывать в подпапки «большие»/«маленькие» по размеру, МБ; 0 — выключить')
