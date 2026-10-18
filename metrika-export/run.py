@@ -1702,7 +1702,8 @@ def cmd_seo(a):
                 if mode == 'yoy':
                     cr, pr = in_weeks(cr, d1), in_weeks(pr, p1)
                 cw, pw = weekly(cr), weekly(pr)
-                n = write_weeks(ws, cw, pw, prev_name, {'mom': 'День', 'qoq': 'Неделя (с понедельника)'}
+                n = write_weeks(ws, cw, pw, prev_name, {'mom': 'День', 'prev': 'День',
+                                                        'qoq': 'Неделя (с понедельника)'}
                                 .get(mode, 'Неделя (7 дней с)'))
                 tables[key] = (cw, pw)
             elif key == 'entry':
@@ -1780,8 +1781,9 @@ def cmd_seo(a):
                    'meta': f'счётчик {cid}{humans_note()}{goal_note()}'
                            + (' · год назад — те же дни недели' if mode == 'yoy' else ''),
                    'prev_label': prev_name, 'cur_label': 'этот год' if mode == 'yoy' else 'сейчас',
-                   'step': 'дням' if mode == 'mom' else 'неделям',
-                   'switch': {'cid': cid, 'kind': 'seo', 'mode': mode,
+                   'step': 'дням' if mode in ('mom', 'prev') else 'неделям',
+                   'switch': {'cid': cid, 'kind': 'seo',
+                              'mode': f'd{days}' if mode == 'prev' and not (a.date_from or a.date_to) else mode,
                               'goal': ','.join(str(g) for g, _ in FOCUS_GOALS)},
                    'goal_options': all_goal_options(cid), 'focus': bool(FOCUS_GOALS),
                    'period_short': f'{d1:%d.%m}–{d2:%d.%m.%Y}', 'exported': datetime.now().strftime('%d.%m.%Y %H:%M'),
@@ -1836,8 +1838,9 @@ def main():
         p.add_argument('--from', dest='date_from', help='начало периода, ГГГГ-ММ-ДД')
         p.add_argument('--to', dest='date_to', help='конец периода, ГГГГ-ММ-ДД')
         p.add_argument('--top', type=int, default=TOP, help=f'строк на лист, по умолчанию {TOP}')
-        p.add_argument('--compare', choices=['yoy', 'mom', 'qoq'],
-                       help='сравнение: yoy — год к году, mom — месяц к месяцу, qoq — квартал к кварталу')
+        p.add_argument('--compare', choices=['prev', 'yoy', 'mom', 'qoq'],
+                       help='сравнение: prev — столько же дней прямо перед периодом, yoy — год к году, '
+                            'mom — месяц к месяцу, qoq — квартал к кварталу')
         p.add_argument('--with-robots', action='store_true', help='считать и роботов (по умолчанию — только люди)')
         p.add_argument('--goal', help='главная цель: номер или часть названия — конверсия и цена цели по ней '
                                       '(для seo и direct обязательна)')

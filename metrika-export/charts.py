@@ -1029,7 +1029,8 @@ def html_dashboard(path, ctx, charts):
            if ctx.get('pdf_name') else '')
     switch = f'<div class="switch">{pdf}</div>' if pdf else ''
     if sw:
-        modes = [('yoy', 'Год к году'), ('mom', 'Месяц к месяцу'), ('qoq', 'Квартал к кварталу')]
+        modes = ([('d14', 'Последние 14 дней'), ('d30', 'Последние 30 дней')] if sw['kind'] == 'seo' else []) + [
+            ('yoy', 'Год к году'), ('mom', 'Месяц к месяцу'), ('qoq', 'Квартал к кварталу')]
         goal = str(sw.get('goal') or '')
         chosen = goal.split(',') if goal else []
         options = ctx.get('goal_options') or []

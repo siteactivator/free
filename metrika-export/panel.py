@@ -36,6 +36,7 @@ KINDS = {
 }
 BUTTONS = [('seo', 'Сформировать SEO-отчёт'), ('direct', 'Сформировать Директ')]
 PARALLEL = 2                 # отчётов одновременно
+LAST_DAYS = ('d14', 'd30')   # кнопки SEO-отчёта «Последние 14 / 30 дней»: --compare prev --days N
 DIRECT_CACHE_HOURS = 24      # как долго верить списку счётчиков с Директом
 
 CSS = """
@@ -294,7 +295,10 @@ def serve(a, core):
             env = dict(os.environ, METRIKA_DATA=str(root), PYTHONIOENCODING='utf-8', PYTHONDONTWRITEBYTECODE='1')
             try:
                 cmd = [sys.executable, '-u', str(core.BASE / 'run.py'), KINDS[kind][5], cid]
-                p = subprocess.Popen(cmd + (['--compare', mode] if mode else []) + (['--goal', goal] if goal else []),
+                # d14, d30 — последние 14 или 30 дней против стольких же дней перед ними
+                period = (['--compare', 'prev', '--days', mode[1:]] if mode in LAST_DAYS
+                          else ['--compare', mode] if mode else [])
+                p = subprocess.Popen(cmd + period + (['--goal', goal] if goal else []),
                                      cwd=str(core.BASE), env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
                                      text=True, encoding='utf-8', errors='replace',
                                      creationflags=getattr(subprocess, 'CREATE_NO_WINDOW', 0))
@@ -457,7 +461,7 @@ def serve(a, core):
                 body = json.loads(self.rfile.read(int(self.headers.get('Content-Length') or 0)) or b'{}')
                 cid, kind, mode = str(int(body['cid'])), body['kind'], body.get('mode') or ''
                 goal = str(body.get('goal') or '')
-                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq') and re.fullmatch(r'(\d+(,\d+){0,4})?', goal)
+                assert kind in KINDS and mode in ('', 'yoy', 'mom', 'qoq', *LAST_DAYS) and re.fullmatch(r'(\d+(,\d+){0,4})?', goal)
             except (ValueError, KeyError, AssertionError, TypeError):
                 return self.send('{"error": "bad request"}', 'application/json', 400)
             job = start(cid, kind, mode, goal)

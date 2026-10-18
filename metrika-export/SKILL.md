@@ -18,8 +18,8 @@ python run.py report <номер или сайт> [--days 30 | --from ГГГГ-�
                      [--group day|week|month] [--only sources,phrases,...] [--top 10000] [--no-compare]
                      [--no-charts]
 python run.py raw <номер или сайт> --metrics ym:s:visits,... [--dimensions ...] [--sort -ym:s:visits]
-python run.py direct <номер или сайт> --goal <цели> [--days 14 | --from --to] [--compare yoy|mom|qoq] [--only ...] [--login логин]
-python run.py seo <номер или сайт> --goal <цели> [--days 28 | --from --to] [--compare yoy|mom|qoq] [--only ...] [--no-charts]
+python run.py direct <номер или сайт> --goal <цели> [--days 14 | --from --to] [--compare prev|yoy|mom|qoq] [--only ...] [--login логин]
+python run.py seo <номер или сайт> --goal <цели> [--days 28 | --from --to] [--compare prev|yoy|mom|qoq] [--only ...] [--no-charts]
 python run.py panel [--port 8790] [--data <папка с отчётами>] [--no-browser]   # http://127.0.0.1:8790/
 ```
 
@@ -79,10 +79,13 @@ python run.py panel [--port 8790] [--data <папка с отчётами>] [--n
 
 ## Сравнение и роботность
 
-- `--compare yoy|mom|qoq` (у `report`, `seo`, `direct`): год к году — целые недели по вчера против тех
+- `--compare prev|yoy|mom|qoq` (у `report`, `seo`, `direct`): prev — `--days` по вчера против стольких же
+  дней прямо перед ними (у `report` и `direct` это и так по умолчанию); год к году — целые недели по вчера против тех
   же дней недели год назад; месяц к месяцу и квартал к кварталу — последний полный против
   предыдущего (`pick_periods`). На странице отчёта те же кнопки: через панель они запускают
-  отчёт с `--compare` и открывают новый.
+  отчёт с `--compare` и открывают новый. В SEO-отчёте ещё «Последние 14 / 30 дней» — режимы
+  панели `d14`, `d30` (`LAST_DAYS` в `panel.py`) → `--compare prev --days 14|30`; динамика поиска
+  в режиме prev — по дням.
 - Все запросы `ym:s` и `ym:pv` — только люди (`isRobot=='No'` добавляется в фильтр в
   `_stat_pages`); у расходов Директа (`ym:ad`) роботности нет. `--with-robots` — все визиты.
   Роботы — до 15–20 % визитов (проверено 12.10.2026: 16,6 % за неделю на живом счётчике).
