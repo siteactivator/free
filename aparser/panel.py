@@ -41,6 +41,7 @@ METHODS = Path(os.getenv("TASK_PANEL_METHODS") or RUNS.parent / "methods")   # �
 DATA_ROOT = (SKILL / "data").resolve()
 APARSER_ENV = Path(os.getenv("APARSER_CONFIG") or SKILL / ".env")
 STALE_SEC = 30          # «пульс» не обновлялся дольше — процесс, скорее всего, остановлен
+LOST_SEC = 600          # молчит дольше — процесс точно пропал (живой шлёт пульс раз в 5 с): «прервана», в завершённые
 SHOW = 40               # сколько последних запусков показывать
 
 
@@ -61,9 +62,14 @@ def load_runs() -> list[dict]:
         now = datetime.now()
         started, beat = _parse(r.get("started")), _parse(r.get("heartbeat") or r.get("updated"))
         end = _parse(r.get("finished")) or now
-        r["elapsed"] = int((end - started).total_seconds()) if started else None
-        if r.get("status") == "running" and beat and (now - beat).total_seconds() > STALE_SEC:
+        silent = (now - beat).total_seconds() if beat else 0
+        if r.get("status") == "running" and beat and silent > LOST_SEC:
+            # процесс убили, не дав записать итог (закрыли окно или сессию) — файл не трогаем, только показываем
+            r["status"], end = "lost", beat
+            r["error"] = r.get("error") or f"прервана — процесс пропал без отчёта, последний пульс {beat:%d.%m %H:%M}; результат не сохранён"
+        elif r.get("status") == "running" and beat and silent > STALE_SEC:
             r["status"] = "stale"
+        r["elapsed"] = int((end - started).total_seconds()) if started else None
         stages = r.get("stages") or []
         total = sum(s.get("total") or 0 for s in stages)
         done = sum(min(s.get("done") or 0, s.get("total") or 0) for s in stages)

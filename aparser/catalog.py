@@ -1,4 +1,5 @@
 """Каталог парсеров A-Parser 1.2.3656: итог проверки 27.09.2026 и какой командой скилла вызывается.
+Перепроверка 28.10.2026 на 1.2.3712 (python run.py check): сломался SE::AOL, Shop::AliExpress — через раз.
 
 Итоги: ok — работает; part — частично; bad — не заработал с первой попытки (мировые прокси
 Premium Mix, настройки по умолчанию); key — нужен аккаунт или ключ; skip — не запускаем;
@@ -15,7 +16,7 @@ PARSERS = {
     "SE::Google": ("ok", "serp/positions --engine google", "адреса настоящие; регион — по IP прокси, язык — ru"),
     "SE::DuckDuckGo": ("ok", "serp/positions --engine duckduckgo", "регион ru-ru"),
     "SE::Yahoo": ("ok", "serp --engine yahoo", ""),
-    "SE::AOL": ("ok", "serp --engine aol", ""),
+    "SE::AOL": ("bad", "serp --engine aol", "28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через --engine yahoo"),
     "SE::Rambler": ("ok", "serp --engine rambler", "~2,5 мин на запрос"),
     "SE::Seznam": ("ok", "serp --engine seznam", "чешский поисковик"),
     "SE::You": ("ok", "serp --engine you", "ИИ-ответ часто пустой"),
@@ -96,7 +97,7 @@ PARSERS = {
     "FreeAI::Server::OpenAI": ("util", "", "локальный OpenAI-совместимый сервер"),
     # магазины и приложения
     "AppStore::Apps": ("ok", "apps --store appstore", ""), "GooglePlay::Apps": ("ok", "apps --store googleplay", ""),
-    "Shop::Amazon": ("ok", "shop --store amazon", ""), "Shop::AliExpress": ("ok", "shop --store aliexpress", ""),
+    "Shop::Amazon": ("ok", "shop --store amazon", ""), "Shop::AliExpress": ("part", "shop --store aliexpress", "28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает"),
     "Shop::Yandex::Market": ("ok", "shop --store market", ""), "Shop::eBay": ("bad", "stub ebay", ""),
     "Shop::Wildberries::ProductsList": ("bad", "stub wb-search", "возможно, нужны российские прокси"), "Shop::Wildberries::Suggest": ("bad", "stub wb-suggest", ""),
     "Shop::Wildberries::ProductInfo": ("bad", "stub wb-product", "не проверен: ссылку брали из ProductsList"),

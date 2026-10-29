@@ -31,11 +31,13 @@ h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .04em; color: v
 .title { font-weight: 600; font-size: 16px; }
 .chip { font-size: 12px; font-weight: 600; padding: 2px 9px; border-radius: 999px; color: #fff; }
 .chip.running { background: var(--blue); } .chip.done { background: var(--green); }
-.chip.error { background: var(--red); } .chip.stale, .chip.partial { background: var(--amber); }
+.chip.error { background: var(--red); } .chip.stale, .chip.partial { background: var(--amber); } .chip.lost { background: var(--muted); }
 .args { font-family: var(--mono); font-size: 12.5px; color: var(--muted); margin: 4px 0 10px; word-break: break-all; }
 .bar { height: 10px; background: var(--track); border-radius: 6px; overflow: hidden; }
 .bar > i { display: block; height: 100%; background: var(--blue); border-radius: 6px; transition: width .6s ease; }
 .done .bar > i { background: var(--green); } .error .bar > i { background: var(--red); } .stale .bar > i, .partial .bar > i { background: var(--amber); }
+.lost .bar > i { background: var(--muted); }
+.card.lost .err { color: var(--muted); }
 .running .bar > i { background-image: linear-gradient(90deg, rgba(255,255,255,.0), rgba(255,255,255,.35), rgba(255,255,255,0));
                     background-size: 200px 100%; background-repeat: no-repeat; animation: shine 1.6s linear infinite; background-color: var(--blue); }
 @keyframes shine { from { background-position: -200px 0; } to { background-position: calc(100% + 200px) 0; } }
@@ -259,7 +261,7 @@ async function post(url, body, btn) {
   tick();
   return ok;
 }
-const STATUS = {running: "идёт", done: "готово", error: "ошибка", stale: "не отвечает", partial: "готово: не всё получено"};
+const STATUS = {running: "идёт", done: "готово", error: "ошибка", stale: "не отвечает", partial: "готово: не всё получено", lost: "прервана"};
 
 function dur(s) {
   if (s == null) return "—";
@@ -309,7 +311,7 @@ function cardShort(r, st) {
     <div class="top"><button class="tog" data-card="${esc(r.id)}" title="развернуть">▸</button>
       <span class="title" title="${esc(r.skill)} · ${esc(r.command)}">${esc(runTitle(r))}</span>
       <span class="chip ${st}">${STATUS[st] || esc(st)}</span>
-      <span class="muted small">${day(r.started)} ${hm(r.started)} · ${st === "stale" ? "шло" : "заняло"} ${dur(r.elapsed)}${r.total ? ` · ${num(r.done)} из ${num(r.total)}, успешно ${num(r.good)}` : ""}</span>
+      <span class="muted small">${day(r.started)} ${hm(r.started)} · ${st === "stale" || st === "lost" ? "шло" : "заняло"} ${dur(r.elapsed)}${r.total ? ` · ${num(r.done)} из ${num(r.total)}, успешно ${num(r.good)}` : ""}</span>
       <span class="args1">${esc(r.args)}</span>
       ${outs ? `<span class="outs1">${outs}</span>` : ""}</div>
     ${r.error ? `<div class="err small">${esc(r.error)}</div>` : ""}
@@ -360,7 +362,7 @@ function saveDoneOpen() { try { localStorage.setItem("tp-done-open", doneOpen ? 
 function doneBlock(rest) {
   const cnt = {};
   rest.forEach(r => { const s = (r.status === "done" && r.total && r.good < r.done) ? "partial" : r.status; cnt[s] = (cnt[s] || 0) + 1; });
-  const summary = ["done", "partial", "error"].filter(k => cnt[k]).map(k => `${STATUS[k]} ${cnt[k]}`).join(" · ");
+  const summary = ["done", "partial", "error", "lost"].filter(k => cnt[k]).map(k => `${STATUS[k]} ${cnt[k]}`).join(" · ");
   const last = rest.map(r => r.finished || r.started || "").sort().pop();
   return `<div class="methods${doneOpen ? "" : " coll"}">
     <div class="mhead"><button class="tog" data-block="done" title="${doneOpen ? "свернуть" : "развернуть"}">${doneOpen ? "▾" : "▸"}</button>

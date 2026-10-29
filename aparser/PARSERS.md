@@ -5,11 +5,17 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 окончательный приговор: для таких парсеров есть заготовки `python run.py stub <имя>` — метод
 добавлен, но в работе не проверен, разбирайтесь сами (README, раздел про заготовки).
 
-Итог: ✅ работает — 86, ⚠️ частично — 4, ❌ не заработал — 23, 🔑 нужен аккаунт/ключ — 11, ⛔ не запускаем — 6, ⚙️ служебный — 7.
+> **Перепроверка 28.10.2026 на A-Parser 1.2.3712** (`python run.py check`, все методы): сломался
+> `SE::AOL` (A-Parser получает от поиска Yahoo пустую страницу), `Shop::AliExpress` работает через раз.
+> Заработали заготовки Startpage (выдача, картинки, видео), Baidu, Dogpile-картинки, eBay,
+> поиск и подсказки Wildberries, отзывы Google; перестала — видео Bing. Таблица ниже обновлена
+> только по AOL и AliExpress, живое состояние каждого метода — в панели задач.
+
+Итог: ✅ работает — 84, ⚠️ частично — 5, ❌ не заработал — 24, 🔑 нужен аккаунт/ключ — 11, ⛔ не запускаем — 6, ⚙️ служебный — 7.
 
 Та же таблица в терминале: `python run.py parsers` (или `--status ok|part|bad|key|skip|util`).
 
-## ✅ работает — 86
+## ✅ работает — 84
 
 | Парсер | Команда скилла | Заметка |
 |---|---|---|
@@ -54,7 +60,6 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `Rank::Social::Signal` | `domains --checks social` |  |
 | `Reddit::PostInfo` | `reddit (адрес поста)` |  |
 | `Reddit::Posts` | `reddit` |  |
-| `SE::AOL` | `serp --engine aol` |  |
 | `SE::Bing::Position` | `serp/positions --engine bing` | используется как источник выдачи Bing |
 | `SE::Bing::Suggest` | `suggest --engine bing` |  |
 | `SE::Bing::Translator` | `translate --engine bing` |  |
@@ -91,7 +96,6 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `SE::YouTube::Suggest` | `suggest --engine youtube` |  |
 | `SE::YouTube::Video` | `youtube` | с комментариями — до 8 мин |
 | `SecurityTrails::Domain` | `trails, domains --checks trails` | без логина — текущие записи |
-| `Shop::AliExpress` | `shop --store aliexpress` |  |
 | `Shop::Amazon` | `shop --store amazon` |  |
 | `Shop::Yandex::Market` | `shop --store market` |  |
 | `Social::TikTok::Profile` | `tiktok` | без списков подписчиков |
@@ -100,7 +104,7 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `Util::ReCaptcha2` | `(внутри Google)` | пресет capmonster |
 | `Util::Turnstile` | `(внутри Ahrefs, Majestic, Bing)` | пресет capmonster |
 
-## ⚠️ частично — 4
+## ⚠️ частично — 5
 
 | Парсер | Команда скилла | Заметка |
 |---|---|---|
@@ -108,8 +112,9 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `SE::Bing::Images` | `stub bing-images` | 1 результат |
 | `SE::Bing::Video` | `stub bing-video` | 0 результатов |
 | `SE::Google::TrustCheck` | `stub trustcheck` | траст 0 даже у Википедии — не верить |
+| `Shop::AliExpress` | `shop --store aliexpress` | 28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает |
 
-## ❌ не заработал — 23
+## ❌ не заработал — 24
 
 | Парсер | Команда скилла | Заметка |
 |---|---|---|
@@ -117,6 +122,7 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `FreeAI::Copilot` | `stub copilot` |  |
 | `FreeAI::Perplexity` | `stub perplexity` | без куки аккаунта |
 | `Reddit::Comments` | `stub reddit-comments` |  |
+| `SE::AOL` | `serp --engine aol` | 28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через `--engine yahoo` |
 | `SE::AOL::Suggest` | `stub aol-suggest` |  |
 | `SE::Baidu` | `stub baidu` |  |
 | `SE::Bing` | `stub bing` | пусто за 7 мин; выдача Bing — через SE::Bing::Position (serp --engine bing) |
