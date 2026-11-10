@@ -2,8 +2,14 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 import re
+import shutil
+import time
+from pathlib import Path
 
+import aparser as ap
 from common import add_io, clean, date_of, domain_of, duration, joined, label_of, ok, read_items, report_failed, run, save, val
 
 # ---------- поисковики ----------
@@ -13,7 +19,9 @@ from common import add_io, clean, date_of, domain_of, duration, joined, label_of
 # ему нужен домен в начале запроса, подставляем служебный example.com и смотрим только serp.
 SERP = {
     "yandex": {"parser": "SE::Yandex", "opts": lambda a: {"engine": "browser", "proxyretries": 20, "lr": a.lr, "pagecount": a.pages}},
-    "google": {"parser": "SE::Google", "opts": lambda a: {"pagecount": a.pages, "gl": a.gl, "hl": a.hl, "lr": f"lang_{a.hl}", "domain": a.google_domain}},
+    # Google режет ботов: 10 попыток мало, а пачка в 100 потоков (common.THREADS) проходит лучше одиночных
+    # запросов — сессию, прошедшую проверку, A-Parser отдаёт другим потокам задания (README, `serp`)
+    "google": {"parser": "SE::Google", "opts": lambda a: {"pagecount": a.pages, "gl": a.gl, "hl": a.hl, "lr": f"lang_{a.hl}", "domain": a.google_domain, "proxyretries": 30, "paaCount": getattr(a, "paa", 0)}},
     "bing": {"parser": "SE::Bing::Position", "opts": lambda a: {"pagecount": a.pages}, "query": lambda q: f"example.com {q}"},
     "duckduckgo": {"parser": "SE::DuckDuckGo", "opts": lambda a: {"pagecount": a.pages, "location": "ru-ru", "language": "ru_RU"}},
     "yahoo": {"parser": "SE::Yahoo", "opts": lambda a: {"pagecount": a.pages}},
@@ -42,22 +50,112 @@ def engines(a, table: dict) -> list[str]:
     return names
 
 
+def country_proxy(a) -> dict:
+    """Прокси страны выдачи: проксичекер APARSER_COUNTRY_CHECKER для --country (по умолчанию --gl) — Google
+    с IP чужой страны почти всегда отвечает капчей. Нет чекера — запросы идут через прокси всех чекеров."""
+    cc = (a.country or getattr(a, "gl", None) or "").strip().lower()
+    if not (ap.COUNTRY_CHECKER and cc):
+        return {}
+    name = ap.COUNTRY_CHECKER.format(country=cc)
+    if ap.live_proxies(name):
+        print(f"  прокси страны {cc}: проксичекер «{name}»")
+        return {"proxyChecker": name}
+    print(f"  нет живых прокси в проксичекере «{name}» — запросы пойдут через прокси всех стран "
+          f"(README, «Прокси по стране выдачи»)")
+    return {}
+
+
+# старше — не продолжение упавшего запуска: метки по умолчанию (google, домен сайта) повторяются
+CACHE_TTL_H = 24
+
+
+def cache_dir(a) -> Path:
+    """Папка кэша порций запуска: data/<команда>/_cache/<метка>. Удаляется после сохранения результата."""
+    return ap.DATA / a.cmd / "_cache" / re.sub(r"[^\w.-]+", "_", a.cache_label)[:40]
+
+
+def serp_cache(a, engine: str, opts: dict) -> Path | None:
+    """Файл кэша порций для ap.bulk: перезапуск с той же меткой продолжит с места сбоя. Хэш настроек в имени —
+    чтобы та же метка с другой страной или глубиной не взяла чужие ответы."""
+    if not getattr(a, "cache_label", None):
+        return None
+    h = hashlib.md5(json.dumps(opts, sort_keys=True, default=str).encode()).hexdigest()[:8]
+    p = cache_dir(a) / f"{engine}__{h}.jsonl"
+    if p.exists() and time.time() - p.stat().st_mtime > CACHE_TTL_H * 3600:
+        print(f"  кэш порций {p.name} старше {CACHE_TTL_H} ч — не беру, все запросы спрашиваю заново")
+        p.unlink()
+    return p
+
+
+def blocks_row(engine: str, q: str, r: dict, organic: list, answer) -> dict:
+    """Строка листа «блоки выдачи»: какие блоки Google показал по запросу (rich), пометки у результатов
+    органики (flags: Video, Image Preview, Featured snippet …) и сколько собрано рекламы, товаров, вопросов."""
+    rich = [x.get("name") for x in r.get("rich") or [] if x.get("name")]
+    flags: dict[str, int] = {}
+    for s in organic:
+        for f in filter(None, (x.strip() for x in str(s.get("flags") or "").split(","))):
+            flags[f] = flags.get(f, 0) + 1
+    return {"поисковик": engine, "запрос": q, "получено": ok(r), "блоки": ", ".join(rich),
+            "ИИ-обзор": bool(clean(answer)) if answer else False, "тип ИИ-обзора": val(r.get("ai_type")),
+            "блок PAA": "People also ask" in rich, "вопросов PAA": len(r.get("paa") or []),
+            "пометки результатов": ", ".join(f"{k}: {v}" for k, v in flags.items()),
+            "реклама": len(r.get("ads") or []), "товары": len(r.get("popularproducts") or []),
+            "похожие запросы": len(r.get("related") or [])}
+
+
 def serp_rows(engine: str, queries: list[str], a) -> tuple[list, dict]:
-    """Выдача одного поисковика → (сырые строки, листы: выдача/сводка/реклама/похожие/вопросы/ИИ-источники)."""
+    """Выдача одного поисковика → (сырые строки, листы: выдача/сводка/блоки выдачи/реклама/похожие/вопросы/
+    ИИ-источники). a.proxy — прокси страны из country_proxy(), его ставят cmd_serp и cmd_positions;
+    a.cache_label — метка кэша порций (serp_cache)."""
     spec = SERP[engine]
     qmap = spec.get("query", lambda q: q)
-    organic_of = lambda r: [s for s in (r.get("serp") or []) if s.get("link") and not is_internal(s.get("link", ""))]
-    rows = run(spec["parser"], [qmap(q) for q in queries], spec["opts"](a), threads=a.threads)
+    opts = {**spec["opts"](a), **a.proxy}
+    rows = run(spec["parser"], [qmap(q) for q in queries], opts, threads=a.threads, cache=serp_cache(a, engine, opts))
     # Пустая органика при «успехе» — не ответ, а сбой: 27.09.2026 Яндекс отдал страницу с 2 объявлениями
     # и без выдачи, A-Parser засчитал её успешной без повторов. Такие запросы переспрашиваем один раз.
     empty = [i for i, r in enumerate(rows) if not organic_of(r)]
     if empty:
         print(f"  {engine}: пустая выдача у {len(empty)} запросов — повтор")
-        again = run(spec["parser"], [qmap(queries[i]) for i in empty], spec["opts"](a), threads=a.threads, progress=None)
+        again = run(spec["parser"], [qmap(queries[i]) for i in empty], opts, threads=a.threads, progress=None)
         for i, r in zip(empty, again):
             if organic_of(r):
                 rows[i] = r
-    sheets = {"выдача": [], "сводка": [], "реклама": [], "похожие запросы": [], "вопросы": [], "ИИ-источники": []}
+    return rows, serp_sheets(engine, queries, rows)
+
+
+# Источники AI overview: парсер их не отдаёт, но в тексте ответа со страницы они стоят в комментарии после
+# процитированной фразы: \x3c!--TgQPHd|||[["https://…",…]]-->. JSON внутри бывает битым — адреса берём регуляркой.
+AI_MARK = re.compile(r"(?:\\x3c|<)!--TgQPHd\|\|\|(.*?)--(?:\\x3e|>)", re.S)
+AI_URL = re.compile(r'"(https?://[^"\\]+)"')
+AI_SKIP = re.compile(r"^https?://([^/]*\.)?(gstatic\.com|google\.[a-z.]+|googleusercontent\.com)/")
+
+
+def ai_sources(answer) -> list[tuple[str, str]]:
+    """Источники из текста AI overview: [(url, фраза ответа перед ссылкой)], по разу на адрес, по порядку.
+    У ответа, подгруженного отдельным запросом (ai_type online), пометок нет — источников не будет."""
+    s, seen, prev = str(answer or ""), {}, 0
+    for m in AI_MARK.finditer(s):
+        frag = None
+        for u in AI_URL.findall(m.group(1)):
+            if u in seen or AI_SKIP.match(u):
+                continue
+            if frag is None:
+                frag = clean(s[prev:m.start()])
+                frag = frag if len(frag) <= 300 else "… " + frag[-300:].split(" ", 1)[-1]
+            seen[u] = frag
+        prev = m.end()
+    return list(seen.items())
+
+
+def organic_of(r: dict) -> list:
+    return [s for s in (r.get("serp") or []) if s.get("link") and not is_internal(s.get("link", ""))]
+
+
+def serp_sheets(engine: str, queries: list[str], rows: list) -> dict:
+    """Листы из ответов парсера, без запросов к A-Parser: отдельно от serp_rows, чтобы таблицу можно было
+    пересобрать из сохранённого .json. Ставит r["query"], r["organic"] и «не получено» при пустой органике."""
+    sheets = {"выдача": [], "сводка": [], "блоки выдачи": [], "реклама": [], "похожие запросы": [], "вопросы": [],
+              "ИИ-источники": []}
     for q, r in zip(queries, rows):
         r["query"] = q
         organic = organic_of(r)
@@ -68,6 +166,8 @@ def serp_rows(engine: str, queries: list[str], a) -> tuple[list, dict]:
         sheets["сводка"].append({"поисковик": engine, "запрос": q, "получено": ok(r), "всего результатов": val(r.get("totalcount")),
                                  "позиций": len(organic), "исправленный запрос": val(r.get("corrected")) or val(r.get("misspell")),
                                  "ИИ-ответ": clean(answer) if answer else None, "определённый регион": val(r.get("detected_geo"))})
+        if "rich" in r:               # блоки страницы различает только парсер Google
+            sheets["блоки выдачи"].append(blocks_row(engine, q, r, organic, answer))
         for i, s in enumerate(organic, 1):
             title = clean(s.get("anchor") or s.get("title"))
             # Yahoo кладёт в заголовок «хлебные крошки» адреса: «https://site.com › pl › windows Заголовок»
@@ -83,13 +183,17 @@ def serp_rows(engine: str, queries: list[str], a) -> tuple[list, dict]:
             k = s.get("key") or s.get("related") or s.get("hint")
             if k:
                 sheets["похожие запросы"].append({"поисковик": engine, "запрос": q, "похожий запрос": clean(k)})
-        for s in r.get("paa") or []:
-            sheets["вопросы"].append({"поисковик": engine, "запрос": q, "вопрос": clean(s.get("question")),
-                                      "ответ": clean(s.get("answer")), "источник": s.get("link"), "ИИ": s.get("isAI")})
+        for i, s in enumerate(r.get("paa") or [], 1):
+            sheets["вопросы"].append({"поисковик": engine, "запрос": q, "№": i, "вопрос": clean(s.get("question"))})
         for s in r.get("ai") or []:
             sheets["ИИ-источники"].append({"поисковик": engine, "запрос": q, "url": s.get("link"),
-                                           "заголовок": clean(s.get("anchor")), "фрагмент": clean(s.get("snippet"))})
-    return rows, sheets
+                                           "домен": domain_of(s.get("link", "")), "заголовок": clean(s.get("anchor")),
+                                           "фрагмент": clean(s.get("snippet"))})
+        if not r.get("ai"):           # парсер источников не дал — берём из пометок в тексте ответа
+            for u, frag in ai_sources(answer):
+                sheets["ИИ-источники"].append({"поисковик": engine, "запрос": q, "url": u, "домен": domain_of(u),
+                                               "заголовок": None, "фрагмент": frag})
+    return sheets
 
 
 def merge(dst: dict, src: dict) -> dict:
@@ -105,10 +209,16 @@ def serp_args(p, default_engine: str = "yandex") -> None:
     p.add_argument("--gl", default="ru", help="Google: страна выдачи (ru)")
     p.add_argument("--hl", default="ru", help="Google: язык интерфейса и результатов (ru)")
     p.add_argument("--google-domain", default="www.google.ru", help="Google: домен поисковика (www.google.ru)")
+    p.add_argument("--country", help="страна парсинга: прокси этой страны для всех поисковиков (по умолчанию — --gl)")
+    p.add_argument("--paa", type=int, default=0,
+                   help="Google: сколько вопросов «Люди также спрашивают» собрать (0 — не собирать)")
 
 
 def cmd_serp(a):
     q = read_items(a)
+    a.proxy = country_proxy(a)
+    label = a.label or a.engine.replace(",", "-")
+    a.cache_label = label             # кэш порций: перезапуск с той же меткой продолжит с места сбоя
     raw, sheets = {}, {}
     for e in engines(a, SERP):
         rows, sh = serp_rows(e, q, a)
@@ -118,12 +228,16 @@ def cmd_serp(a):
     for rows in raw.values():
         for r in rows:
             r.pop("organic", None)
-    save("serp", a.label or a.engine.replace(",", "-"), sheets, raw)
+    save("serp", label, sheets, raw)
+    shutil.rmtree(cache_dir(a), ignore_errors=True)
 
 
 def cmd_positions(a):
     q = read_items(a)
     sites = [domain_of(s) for s in a.site.split(",") if s.strip()]
+    a.proxy = country_proxy(a)
+    label = a.label or "_".join(sites)[:30]
+    a.cache_label = label             # кэш порций: перезапуск с той же меткой продолжит с места сбоя
     raw, sheets, pos = {}, {}, []
     for e in engines(a, SERP):
         rows, sh = serp_rows(e, q, a)
@@ -141,7 +255,8 @@ def cmd_positions(a):
     for rows in raw.values():
         for r in rows:
             r.pop("organic", None)
-    save("positions", a.label or "_".join(sites)[:30], {"позиции": pos, **sheets}, raw)
+    save("positions", label, {"позиции": pos, **sheets}, raw)
+    shutil.rmtree(cache_dir(a), ignore_errors=True)
 
 
 # ---------- подсказки ----------
@@ -174,26 +289,43 @@ def cmd_suggest(a):
          {"подсказки": flat, "уникальные": [{"подсказка": x} for x in uniq]}, raw)
 
 
-# ---------- индексация (Яндекс) ----------
+# ---------- индексация ----------
 
-YANDEX = {"engine": "browser", "proxyretries": 20}
+# url — запрос для проверки одной страницы; prefix — оператор ищет по началу адреса (site: у Google): у главной
+# и раздела первыми идут вложенные страницы, и если самой страницы среди них нет, ответ — «не видно», а не «нет».
+# Индекс Google один для всех стран, поэтому прокси берём той страны, где Google отвечает лучше (country), а язык
+# результатов не ограничиваем — иначе выпадут страницы на других языках.
+INDEX = {
+    "yandex": {"parser": "SE::Yandex", "name": "Яндекса", "url": lambda u: f"url:{u}",
+               "opts": lambda a: {"engine": "browser", "proxyretries": 20, "lr": a.lr, "pagecount": 1}},
+    "google": {"parser": "SE::Google", "name": "Google", "country": "in", "prefix": True,
+               "url": lambda u: f"site:{u}",
+               "opts": lambda a: {"gl": "in", "hl": "en", "lr": "", "domain": "www.google.co.in", "proxyretries": 30,
+                                  "pagecount": 1}},
+}
 
 
 def cmd_index(a):
+    spec = INDEX[a.engine]
+    a.country = a.country or spec.get("country")
+    opts = {**spec["opts"](a), **country_proxy(a)}
     if a.site:
         sites = [domain_of(s) for s in a.site.split(",")]
-        rows = run("SE::Yandex", [f"site:{s}" for s in sites], {**YANDEX, "lr": a.lr, "pagecount": 1}, threads=a.threads)
+        rows = run(spec["parser"], [f"site:{s}" for s in sites], opts, threads=a.threads)
         report_failed(rows)
-        save("index", a.label or "site", {"сайты": [{"сайт": s, "страниц в индексе Яндекса": val(r.get("totalcount")), "получено": ok(r)}
-                                                   for s, r in zip(sites, rows)]}, rows)
+        save("index", a.label or "site", {"сайты": [{"сайт": s, f"страниц в индексе {spec['name']}": val(r.get("totalcount")),
+                                                    "получено": ok(r)} for s, r in zip(sites, rows)]}, rows)
         return
     urls = read_items(a)
     norm = lambda u: re.sub(r"^https?://", "", u).rstrip("/").lower()
-    rows = run("SE::Yandex", [f"url:{norm(u)}" for u in urls], {**YANDEX, "lr": a.lr, "pagecount": 1}, threads=a.threads)
+    rows = run(spec["parser"], [spec["url"](norm(u)) for u in urls], opts, threads=a.threads)
     out = []
     for u, r in zip(urls, rows):
         links = [norm(s.get("link", "")).removeprefix("www.") for s in (r.get("serp") or [])]
-        out.append({"url": u, "в индексе Яндекса": (norm(u).removeprefix("www.") in links) if ok(r) else None, "получено": ok(r)})
+        found = norm(u).removeprefix("www.") in links
+        unseen = spec.get("prefix") and links and not found          # есть вложенные, самой страницы не видно
+        out.append({"url": u, f"в индексе {spec['name']}": None if not ok(r) or unseen else found,
+                    "результатов": val(r.get("totalcount")), "получено": ok(r)})
     report_failed(rows)
     save("index", a.label or "urls", {"индексация": out}, rows)
 
@@ -315,10 +447,12 @@ def register(sub):
     p.add_argument("--lr", type=int, default=213, help="Яндекс: регион")
     p.set_defaults(func=cmd_suggest)
 
-    p = sub.add_parser("index", help="индексация в Яндексе: страница в индексе (url:) или сколько страниц у сайта (--site)")
+    p = sub.add_parser("index", help="индексация в Яндексе или Google: страница в индексе или сколько страниц у сайта (--site)")
     add_io(p, "адреса страниц")
+    p.add_argument("--engine", choices=list(INDEX), default="yandex", help="поисковик (yandex)")
     p.add_argument("--site", help="режим site: — домены через запятую")
-    p.add_argument("--lr", type=int, default=213)
+    p.add_argument("--lr", type=int, default=213, help="Яндекс: регион (213)")
+    p.add_argument("--country", help="страна прокси (у Google по умолчанию in, у Яндекса — прокси всех чекеров)")
     p.set_defaults(func=cmd_index)
 
     p = sub.add_parser("images", help="поиск картинок: Яндекс, DuckDuckGo, Pinterest")

@@ -22,8 +22,14 @@ from __future__ import annotations
 
 import argparse
 import json
+import importlib.util
+import os
+import subprocess
 import sys
+import time
+import urllib.request
 from collections import Counter
+from pathlib import Path
 
 import aparser as ap
 import progress
@@ -35,6 +41,69 @@ import cmd_more
 import cmd_search
 import cmd_stubs
 from common import add_io, label_of, read_items, report_failed, run, save
+
+
+PANEL_PORT = 8770
+
+
+def local_commands() -> list:
+    """Свои команды установки: local/cmd_<имя>.py с register(sub), как у cmd_*.py. Папка local в .gitignore."""
+    mods = []
+    for f in sorted((Path(__file__).resolve().parent / "local").glob("cmd_*.py")):
+        spec = importlib.util.spec_from_file_location(f.stem, f)
+        m = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(m)
+        mods.append(m)
+    return mods
+
+
+def _panel_url() -> str:
+    return f"http://127.0.0.1:{PANEL_PORT}/"
+
+
+def _panel_alive() -> bool:
+    # без системного прокси: адрес локальный; узнаём панель по заголовку страницы, а не по открытому порту
+    try:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+        with opener.open(_panel_url(), timeout=1) as r:
+            return "<title>Панель задач</title>" in r.read(4096).decode("utf-8", "replace")
+    except OSError:
+        return False
+
+
+# промежуточный процесс: запускает панель отвязанной от консоли и сразу выходит — у панели не остаётся
+# живого родителя, и «убить дерево процессов» команды (остановка задачи агентом, Ctrl+C) её не задевает
+_LAUNCH = """import os, subprocess, sys
+log = open(sys.argv[1], "ab")
+kw = dict(cwd=sys.argv[2], stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+if os.name == "nt":
+    kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+else:
+    kw["start_new_session"] = True
+subprocess.Popen(sys.argv[3:], **kw)
+"""
+
+
+def ensure_panel() -> None:
+    """Панель задач поднимается сама: нет её на 127.0.0.1:8770 — запускаем panel.py фоновым процессом
+    без окна, он переживёт эту команду. Ссылку печатаем всегда — агент отдаёт её пользователю в чат."""
+    if os.getenv("TASK_PANEL_RUNS"):     # команда внутри check (свои запуски в data\_check) — панель не трогаем
+        return
+    if not _panel_alive():
+        here = Path(__file__).resolve().parent
+        (here / "data").mkdir(exist_ok=True)
+        subprocess.run([sys.executable, "-c", _LAUNCH, str(here / "data" / "_panel.log"), str(here),
+                        sys.executable, str(here / "panel.py"), "--port", str(PANEL_PORT)],
+                       env={**os.environ, "PYTHONIOENCODING": "utf-8"}, timeout=30,
+                       creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+        for _ in range(40):
+            time.sleep(0.25)
+            if _panel_alive():
+                break
+        else:
+            print("Панель задач не поднялась — причина в data\\_panel.log; команда идёт без неё", flush=True)
+            return
+    print(f"Панель задач: {_panel_url()}", flush=True)
 
 
 def cmd_status(a):
@@ -94,7 +163,7 @@ def main() -> int:
     s = sub.add_parser("parsers", help="все парсеры: что работает, чем вызывается, почему нет")
     s.add_argument("--status", choices=["ok", "part", "bad", "key", "skip", "util"], help="только с этим итогом")
     s.set_defaults(func=cmd_parsers, offline=True)
-    for m in (cmd_search, cmd_keywords, cmd_domains, cmd_content, cmd_more, cmd_stubs, cmd_check):
+    for m in (cmd_search, cmd_keywords, cmd_domains, cmd_content, cmd_more, cmd_stubs, cmd_check, *local_commands()):
         m.register(sub)
     s = sub.add_parser("raw", help="любой парсер A-Parser с опциями --set id=значение")
     add_io(s)
@@ -105,7 +174,8 @@ def main() -> int:
     a = p.parse_args()
     if getattr(a, "offline", False) or (a.cmd == "stub" and not a.name):
         return a.func(a) or 0
-    # запуск виден в панели задач (python panel.py)
+    # запуск виден в панели задач; панель поднимается сама
+    ensure_panel()
     import common
     if getattr(a, "retry", None) is not None:
         common.RETRY["n"] = a.retry

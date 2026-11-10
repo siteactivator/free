@@ -24,7 +24,7 @@ def add_io(p, what: str = "запросы") -> None:
     """Общие параметры входа и выхода для подкоманды."""
     p.add_argument("-q", help=f"{what} через точку с запятой")
     p.add_argument("-f", help="файл: .txt (по строке) или .xlsx/.csv (первая колонка)")
-    p.add_argument("--threads", type=int, default=5, help="сколько запросов A-Parser выполняет параллельно (5)")
+    p.add_argument("--threads", type=int, help="сколько запросов A-Parser выполняет параллельно (5, у парсеров из THREADS — свои)")
     p.add_argument("--label", help="метка в имени файла результата")
     p.add_argument("--retry", type=int, help="повторов для неполученных запросов (по умолчанию 1)")
     p.add_argument("--pause", type=int, default=30, help="пауза перед повтором, секунд (30)")
@@ -53,18 +53,28 @@ def read_items(a, dedupe: bool = True) -> list[str]:
 
 RETRY = {"n": 1, "pause": 30}      # повтор неполученных с паузой: run.py ставит из --retry/--pause
 
+# Потоки, когда --threads не задан (у остальных парсеров — 5). Только парсеры без браузера, проверенные на этом
+# числе (README, «Скорость и расходы»). Google: больше 100 задание виснет — один процесс на задание
+THREADS = {"SE::Google": 100, "Rank::Ahrefs": 100, "Rank::Ahrefs::TrafficChecker": 100, "Rank::Ahrefs::BrokenLinks": 100,
+           "Rank::Ahrefs::KeywordDifficulty": 100, "Rank::Ahrefs::KeywordGenerator": 100}
 
-def run(parser: str, queries: list[str], overrides: dict | None = None, threads: int = 5,
-        keep: tuple = (), progress=print, retry: int | None = None) -> list[dict]:
+
+def run(parser: str, queries: list[str], overrides: dict | None = None, threads: int | None = None,
+        keep: tuple = (), progress=print, retry: int | None = None, cache: Path | None = None,
+        fields: tuple | None = None) -> list[dict]:
     """Пачка запросов с пресетами капчи, где они нужны. Строки — в порядке запросов.
 
     A-Parser сам делает до 10 попыток на запрос, но подряд, без пауз — короткий сбой (капча, лимит
-    сервиса) их съедает. Поэтому неполученные запросы переспрашиваем ещё раз после паузы."""
+    сервиса) их съедает. Поэтому неполученные запросы переспрашиваем ещё раз после паузы.
+    cache — файл .jsonl для ap.bulk: готовые порции переживают падение и перезапуск команды;
+    fields — запросить у парсера только эти поля (см. ap.bulk)."""
     ov = {**ap.captcha(parser), **(overrides or {})}
+    threads = threads or THREADS.get(parser, 5)
     run_ = pg.CURRENT
     idx = run_.stage(parser, len(queries)) if run_ else None
     on_batch = (lambda done, good: run_.advance(idx, done, good)) if run_ else None
-    rows = ap.bulk(parser, queries, ov, threads=threads, keep=keep, progress=progress, on_batch=on_batch)
+    rows = ap.bulk(parser, queries, ov, threads=threads, keep=keep, progress=progress, on_batch=on_batch, cache=cache,
+                   fields=fields)
     tries = RETRY["n"] if retry is None else retry
     for attempt in range(1, tries + 1):
         bad = [i for i, r in enumerate(rows) if not ok(r)]
@@ -73,7 +83,8 @@ def run(parser: str, queries: list[str], overrides: dict | None = None, threads:
         if progress:
             progress(f"  {parser}: не получено {len(bad)} — повтор {attempt}/{tries} через {RETRY['pause']} с")
         time.sleep(RETRY["pause"])
-        again = ap.bulk(parser, [queries[i] for i in bad], ov, threads=threads, keep=keep, progress=None)
+        again = ap.bulk(parser, [queries[i] for i in bad], ov, threads=threads, keep=keep, progress=None, cache=cache,
+                        fields=fields)
         for i, r in zip(bad, again):
             if ok(r):
                 rows[i] = r
@@ -205,14 +216,17 @@ def label_of(a, items: list[str], default: str) -> str:
 # ---------- текст и значения ----------
 
 CONTROL = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f]")
+COMMENT = re.compile(r"<!--.*?-->", re.S)
 
 
 def clean(html) -> str:
     """HTML → текст в одну строку. Метки подсветки Яндекса (\\x07[ … \\x07]) и управляющие символы убираются;
-    «none»/«null» (так A-Parser пишет пустое поле) → пустая строка."""
+    «none»/«null» (так A-Parser пишет пустое поле) → пустая строка. HTML-комментарии — тоже: в AI overview
+    Google прячет в них источники, «<» приходит текстом \\x3c (источники разбирает cmd_search.ai_sources)."""
     if html is None or str(html).strip().lower() in ("none", "null", "undefined"):
         return ""
     s = CONTROL.sub("", re.sub(r"\x07[\[\]]", "", str(html)))
+    s = COMMENT.sub(" ", s.replace("\\x3c", "<").replace("\\x3e", ">"))
     s = re.sub(r"<[^>]+>", " ", s)
     s = s.replace("&amp;", "&").replace("&quot;", '"').replace("&#39;", "'").replace("&lt;", "<").replace("&gt;", ">").replace("&nbsp;", " ")
     return re.sub(r"\s+", " ", s).strip()

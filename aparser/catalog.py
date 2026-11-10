@@ -1,5 +1,6 @@
 """Каталог парсеров A-Parser 1.2.3656: итог проверки 27.09.2026 и какой командой скилла вызывается.
 Перепроверка 28.10.2026 на 1.2.3712 (python run.py check): сломался SE::AOL, Shop::AliExpress — через раз.
+Перепроверка 09.11.2026 на 1.2.3742 Beta (13 методов): пять заготовок вернули данные → part, Startpage не работает.
 
 Итоги: ok — работает; part — частично; bad — не заработал с первой попытки (мировые прокси
 Premium Mix, настройки по умолчанию); key — нужен аккаунт или ключ; skip — не запускаем;
@@ -16,7 +17,7 @@ PARSERS = {
     "SE::Google": ("ok", "serp/positions --engine google", "адреса настоящие; регион — по IP прокси, язык — ru"),
     "SE::DuckDuckGo": ("ok", "serp/positions --engine duckduckgo", "регион ru-ru"),
     "SE::Yahoo": ("ok", "serp --engine yahoo", ""),
-    "SE::AOL": ("bad", "serp --engine aol", "28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через --engine yahoo"),
+    "SE::AOL": ("bad", "serp --engine aol", "28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через --engine yahoo; 09.11.2026 на 1.2.3742 — то же"),
     "SE::Rambler": ("ok", "serp --engine rambler", "~2,5 мин на запрос"),
     "SE::Seznam": ("ok", "serp --engine seznam", "чешский поисковик"),
     "SE::You": ("ok", "serp --engine you", "ИИ-ответ часто пустой"),
@@ -26,7 +27,7 @@ PARSERS = {
     "SE::YouTube": ("ok", "video --engine youtube", ""),
     "SE::YouTube::Video": ("ok", "youtube", "с комментариями — до 8 мин"),
     "SE::Bing": ("bad", "stub bing", "пусто за 7 мин; выдача Bing — через SE::Bing::Position (serp --engine bing)"),
-    "SE::Baidu": ("bad", "stub baidu", ""), "SE::Brave": ("bad", "stub brave", ""), "SE::Dogpile": ("bad", "stub dogpile", ""), "SE::Startpage": ("bad", "stub startpage", ""),
+    "SE::Baidu": ("part", "stub baidu", "09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли"), "SE::Brave": ("bad", "stub brave", ""), "SE::Dogpile": ("bad", "stub dogpile", ""), "SE::Startpage": ("bad", "stub startpage", "у автора 28.10.2026 на 1.2.3712 заработала; 09.11.2026 на 1.2.3742 — Content mismatch на 10 разных резидентских IP (ответ 200, 21 КБ)"),
     "SE::Quora": ("key", "stub quora", "кука аккаунта Quora"),
     # позиции
     "SE::Google::Position": ("ok", "raw", "точный хост (Match type: Exact domain); в скилле позиции считаются по выдаче"),
@@ -80,9 +81,9 @@ PARSERS = {
     # картинки и видео
     "SE::Yandex::Images": ("ok", "images --engine yandex", ""), "SE::Yandex::Video": ("ok", "video --engine yandex", ""),
     "SE::Yandex::ByImage": ("ok", "byimage", "JPG; PNG-миниатюру не взял"), "SE::DuckDuckGo::Images": ("ok", "images --engine duckduckgo", ""),
-    "SE::Bing::Images": ("part", "stub bing-images", "1 результат"), "SE::Bing::Video": ("part", "stub bing-video", "0 результатов"),
-    "SE::Google::Images": ("bad", "stub google-images", ""), "SE::Google::ByImage": ("bad", "stub google-byimage", ""), "SE::Dogpile::Images": ("bad", "stub dogpile-images", ""),
-    "SE::Startpage::Images": ("bad", "stub startpage-images", ""), "SE::Startpage::Videos": ("bad", "stub startpage-videos", ""),
+    "SE::Bing::Images": ("part", "stub bing-images", "1 результат"), "SE::Bing::Video": ("part", "stub bing-video", "27.09 — 0 результатов; 09.11.2026 на 1.2.3742 — данные есть (1 запрос)"),
+    "SE::Google::Images": ("bad", "stub google-images", ""), "SE::Google::ByImage": ("bad", "stub google-byimage", ""), "SE::Dogpile::Images": ("part", "stub dogpile-images", "09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли"),
+    "SE::Startpage::Images": ("bad", "stub startpage-images", "как SE::Startpage: 09.11.2026 на 1.2.3742 пусто"), "SE::Startpage::Videos": ("bad", "stub startpage-videos", "как SE::Startpage: 09.11.2026 на 1.2.3742 пусто"),
     # переводы и тексты
     "SE::Google::Translate": ("ok", "translate --engine google", ""), "SE::Bing::Translator": ("ok", "translate --engine bing", ""),
     "DeepL::Translator": ("ok", "translate --engine deepl", ""), "DeepL::Write": ("ok", "proofread", ""),
@@ -97,13 +98,13 @@ PARSERS = {
     "FreeAI::Server::OpenAI": ("util", "", "локальный OpenAI-совместимый сервер"),
     # магазины и приложения
     "AppStore::Apps": ("ok", "apps --store appstore", ""), "GooglePlay::Apps": ("ok", "apps --store googleplay", ""),
-    "Shop::Amazon": ("ok", "shop --store amazon", ""), "Shop::AliExpress": ("part", "shop --store aliexpress", "28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает"),
-    "Shop::Yandex::Market": ("ok", "shop --store market", ""), "Shop::eBay": ("bad", "stub ebay", ""),
-    "Shop::Wildberries::ProductsList": ("bad", "stub wb-search", "возможно, нужны российские прокси"), "Shop::Wildberries::Suggest": ("bad", "stub wb-suggest", ""),
+    "Shop::Amazon": ("ok", "shop --store amazon", ""), "Shop::AliExpress": ("part", "shop --store aliexpress", "28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает; 09.11.2026 на 1.2.3742 — 1 из 1"),
+    "Shop::Yandex::Market": ("ok", "shop --store market", ""), "Shop::eBay": ("part", "stub ebay", "09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли"),
+    "Shop::Wildberries::ProductsList": ("part", "stub wb-search", "09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос, прокси не российские), поля не сверяли"), "Shop::Wildberries::Suggest": ("part", "stub wb-suggest", "09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли"),
     "Shop::Wildberries::ProductInfo": ("bad", "stub wb-product", "не проверен: ссылку брали из ProductsList"),
     # карты
     "Maps::Google": ("ok", "maps --engine google", ""), "Maps::Yandex": ("ok", "maps --engine yandex", ""),
-    "Maps::Google::Reviews": ("part", "stub google-reviews", "рейтинг и число отзывов есть, самих отзывов — первые 5"),
+    "Maps::Google::Reviews": ("part", "stub google-reviews", "рейтинг и число отзывов есть, самих отзывов — первые 5; 09.11.2026 на 1.2.3742 — данные есть"),
     # соцсети
     "Reddit::Posts": ("ok", "reddit", ""), "Reddit::PostInfo": ("ok", "reddit (адрес поста)", ""), "Reddit::Comments": ("bad", "stub reddit-comments", ""),
     "Social::TikTok::Profile": ("ok", "tiktok", "без списков подписчиков"), "Telegram::GroupScraper": ("ok", "telegram", ""),
