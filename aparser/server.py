@@ -58,6 +58,13 @@ def status() -> int:
         if ap.PROXY_CHECKER:
             line += f", в проксичекере {ap.PROXY_CHECKER} {ap.live_proxies(ap.PROXY_CHECKER)}"
         print(line)
+    # особенности поставщика прокси — в его профиле proxies/<имя>.md (proxies/README.md)
+    profile = ap.ENV.get("APARSER_PROXY_PROFILE", "")
+    path = Path(__file__).parent / "proxies" / f"{profile}.md"
+    if not profile:
+        print("профиль прокси: не задан (APARSER_PROXY_PROFILE в .env, папка proxies)")
+    else:
+        print(f"профиль прокси: {path}" if path.exists() else f"профиль прокси {profile}: нет файла {path}")
     bal = ap.capmonster_balance()
     print(f"CapMonster: баланс {'$' + str(bal) if bal is not None else 'не проверен'}")
     return 0 if alive else 1

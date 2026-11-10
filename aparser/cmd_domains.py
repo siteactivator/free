@@ -4,6 +4,7 @@ Majestic, Mustat, SecurityTrails, IP и хостинг, проверка ссы�
 from __future__ import annotations
 
 import json
+import re
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -16,6 +17,7 @@ import progress as pg
 from common import add_io, clean, domain_of, is_ip, joined, label_of, num_short, ok, read_items, report_failed, run, save, val
 
 RKN_LIST = "https://antifilter.download/list/domains.lst"   # выгрузка реестра РКН, ~1,7 млн доменов
+GEO = {"cc": "ru"}     # страна для доли трафика: --geo у domains
 
 
 def _d(d):
@@ -50,18 +52,55 @@ def _dns_records(r) -> str:
     return ", ".join(out)
 
 
+def traffic_trend(history) -> float | None:
+    """Тренд органики по истории Ahrefs (~6 месяцев), %:
+    база — среднее трёх первых месяцев; берётся худшее из «среднее трёх последних к базе» и «последний месяц
+    к базе» — среднее прячет обвал после всплеска (1,7k → 20k → 511 в среднем выглядит ростом).
+    Поля читаются через dict.get: история остаётся на листе «прочие поля», тренд её не заменяет."""
+    pts = sorted((str(dict.get(x, "date")), val(dict.get(x, "organic"))) for x in history or [] if isinstance(x, dict))
+    v = [n for _, n in pts if isinstance(n, (int, float))]
+    if len(v) < 4:           # меньше 4 месяцев — база и последние месяцы почти совпадают
+        return None
+    base = sum(v[:3]) / 3
+    return round(100 * (min(sum(v[-3:]) / 3, v[-1]) / base - 1), 1) if base else None
+
+
+def country_share(countries) -> float | None:
+    """Доля трафика из страны GEO, %. Ahrefs отдаёт топ-5 стран: нет страны в топе — 0.
+    GEO «ww» — весь мир: подходит любая страна, доля 100%, если Ahrefs вообще знает страны трафика."""
+    if GEO["cc"] == "ww":
+        return 100.0 if countries else None
+    for x in countries or []:
+        if isinstance(x, dict) and str(dict.get(x, "country", "")).lower() == GEO["cc"]:
+            return round(float(val(dict.get(x, "share")) or 0), 1)
+    return 0.0 if countries else None
+
+
+# серые ниши среди исходящих доменов Keys.so
+GREY = re.compile(r"casino|kazino|vulkan|azino|joycasino|pin-?up|vavada|pokerdom|poker|1xbet|mostbet|melbet|fonbet|parimatch|"
+                  r"leonbets|1win|betting|bookmaker|porn|xxx|escort|viagra|cialis|levitra|zaim|mikrozaim|payday", re.I)
+
+
+def grey_share(outlinks) -> float | None:
+    """Доля серых доменов среди исходящих Keys.so (список из ~10 доменов), %."""
+    doms = [str(dict.get(x, "domain", "")) for x in outlinks or [] if isinstance(x, dict)]
+    return round(100 * sum(1 for d in doms if GREY.search(d)) / len(doms)) if doms else None
+
+
 # проверка → (парсер, запрос из домена, настройки, колонки из результата)
+# whois, archive, sqi — без прокси: через SOCKS-прокси whois по порту 43 (.ru — whois.tcinet.ru, .de — denic) рвётся
+# у половины доменов, без прокси отвечает за 0,1 с; archive и ИКС без прокси работают так же, быстрее и без капчи
 CHECKS = {
-    "whois": ("Net::Whois", _d, {}, lambda r: {
+    "whois": ("Net::Whois", _d, {"useproxy": 0}, lambda r: {
         "зарегистрирован": val(r.get("registered")), "регистратор": val(r.get("registrar")), "создан": val(r.get("creation_date")),
         "обновлён": val(r.get("updated_date")), "оплачен до": val(r.get("expire_date")), "освобождается": val(r.get("free_date")),
         # статусы домена (clientHold, redemptionPeriod, pendingDelete…) — для дропов важно, на каком он этапе
         "статусы": joined(r.get("statuses"), "status"), "NS": joined(r.get("ns"), "server")}),
-    "archive": ("Rank::Archive", _d, {}, lambda r: {
+    "archive": ("Rank::Archive", _d, {"useproxy": 0}, lambda r: {
         "архив: первый снимок": val(r.get("first")), "архив: последний": val(r.get("last")), "архив: снимков": val(r.get("times"))}),
     "dns": ("Net::DNS", _d, {}, lambda r: {"IP": _dns_ips(r), "DNS: записи": _dns_records(r)}),
     "cms": ("Rank::CMS", _http, {"useproxy": 0}, lambda r: {"CMS": joined(r.get("list"), "cms") or val(r.get("cms"))}),
-    "sqi": ("SE::Yandex::SQI", _d, {}, lambda r: {
+    "sqi": ("SE::Yandex::SQI", _d, {"useproxy": 0}, lambda r: {
         "ИКС": val(r.get("sqi")), "Яндекс: рейтинг": val(r.get("rating")), "Яндекс: отзывов": val(r.get("reviews")),
         "Яндекс: официальный сайт": val(r.get("official"))}),
     "rkn_ap": ("Check::RosKomNadzor", _d, {}, lambda r: {
@@ -76,9 +115,12 @@ CHECKS = {
         "Ahrefs DR": val(r.get("rating")), "Ahrefs: беклинков": val(r.get("bl")), "Ahrefs: ссылающихся доменов": val(r.get("domains")),
         "Ahrefs: доменов dofollow, %": val(r.get("domains_dofollow"))}),
     "traffic": ("Rank::Ahrefs::TrafficChecker", _d, {}, lambda r: {
-        "Ahrefs: трафик в месяц": val(r.get("traffic")), "Ahrefs: стоимость трафика, $": val(r.get("cost"))}),
+        "Ahrefs: трафик в месяц": val(r.get("traffic")), "Ahrefs: стоимость трафика, $": val(r.get("cost")),
+        "Ahrefs: тренд трафика, %": traffic_trend(r.get("history")),
+        f"Ahrefs: доля {GEO['cc'].upper()}, %": country_share(r.get("countries"))}),
     "moz": ("Rank::MOZ", _d, {}, lambda r: {
-        "MOZ DA": num_short(r.get("authority")), "MOZ Spam Score, %": num_short(r.get("spam")),
+        # «--» — у Moz нет Spam Score для домена: пусто, а не текст в числовой колонке
+        "MOZ DA": num_short(r.get("authority")), "MOZ Spam Score, %": None if r.get("spam") == "--" else num_short(r.get("spam")),
         "MOZ: ссылающихся доменов": num_short(r.get("linking")), "MOZ: ключей": num_short(r.get("keywords"))}),
     "majestic": ("Rank::MajesticSEO", _d, {}, lambda r: {
         "Majestic TF": val(r.get("trustflow")), "Majestic CF": val(r.get("citationflow")), "Majestic: беклинков": val(r.get("backlinks")),
@@ -94,8 +136,22 @@ CHECKS = {
     "trails": ("SecurityTrails::Domain", _d, {}, lambda r: {
         "SecurityTrails: A": joined(r.get("aRecords"), "ip"), "SecurityTrails: NS": joined(r.get("nsRecords"), "ns"),
         "SecurityTrails: MX": joined(r.get("mxRecords"), "host"), "SecurityTrails: поддоменов": val(r.get("subdomain_count"))}),
+    # Keys.so (кука APARSER_KEYSSO_USERLOGIN в .env, база msk): трафик и ключи из Яндекса, страниц в индексе, свой DR,
+    # ссылки (с A-Parser 1.2.3712): входящих / исходящих ссылок — экземпляры с учётом сквозных (у магазина
+    # 1,9 млн исходящих на 21 домен), поэтому для скоринга — домены: ссылающихся и исходящих. outlinks — 10 исходящих
+    # доменов с DR. by_keys / by_vis парсер тоже отдаёт — это места в рейтинге Keys.so, не счётчики (лист «прочие поля»)
+    "keysso": ("Rank::KeysSo", _d, {"se_db": "msk"}, lambda r: {
+        "Keys.so: трафик Яндекса": val(r.get("search_traff")), "Keys.so: ключей в топ-10": val(r.get("in_top10")),
+        "Keys.so: ключей в топ-50": val(r.get("in_top50")), "Keys.so: страниц": val(r.get("pages_count")), "Keys.so: DR": val(r.get("dr")),
+        "Keys.so: ссылающихся доменов": val(r.get("backlinks_domains_count")), "Keys.so: исходящих доменов": val(r.get("outlinks_domains_count")),
+        "Keys.so: входящих ссылок": val(r.get("backlinks_count")), "Keys.so: исходящих ссылок": val(r.get("outlinks_count")),
+        "Keys.so: ссылок по IP": val(r.get("backlinks_ip_count")), "Keys.so: анкоров": val(r.get("backlinks_anchor_count")),
+        "Keys.so: исходящие домены": joined(r.get("outlinks"), "domain"), "Keys.so: серых среди исходящих, %": grey_share(r.get("outlinks"))}),
 }
 SPECIAL = ("rkn", "hosting")                    # реестр antifilter и хостинг по IP — не парсер «домен → ответ»
+# проверки, где у парсера запрашиваются только нужные поля: Rank::MOZ (1.2.3697) теряет весь ответ, когда разбирает
+# discoveredAndLostLinkingDomains на доменах без этого блока (фермы, молодые сайты, ~60% доменов одной выборки)
+FIELDS = {"moz": ("authority", "spam", "linking", "keywords")}
 ALIASES = {"safe": ["safe_google", "safe_yandex"]}
 PRESETS = {
     "default": ["whois", "archive", "rkn", "sqi", "dns"],
@@ -168,20 +224,27 @@ def hosting(ips: dict[str, str], threads: int) -> dict[str, dict]:
     return out
 
 
-def cmd_domains(a):
-    doms = [domain_of(d) for d in read_items(a)]
-    checks = parse_checks(a.checks)
+def collect(doms: list[str], checks: list[str], threads: int, retry: int | None = None,
+            cache_dir: Path | None = None) -> tuple[dict, dict]:
+    """Проверки доменов → (таблица «домен → колонки», сырые ответы по проверкам). Общее для domains и других команд.
+    retry — повторов неполученных (None — как в --retry); cache_dir — папка кэша порций (<проверка>.jsonl)."""
     table = {d: {"домен": d} for d in doms}
     raw = {}
     parsers = [c for c in checks if c in CHECKS]
     if "hosting" in checks and "dns" not in parsers:
         parsers.append("dns")
+    if "keysso" in parsers and not ap.ENV.get("APARSER_KEYSSO_USERLOGIN"):
+        print("  keysso: пропущен — нет APARSER_KEYSSO_USERLOGIN в .env (кука userlogin из браузера после входа в keys.so)")
+        parsers.remove("keysso")
 
     def one_check(c):
         if c == "safe_google" and ap.ENV.get("GOOGLE_SAFEBROWSING_KEY"):
             return c, safe_google_api(doms)
         parser, qf, ov, _ = CHECKS[c]
-        return c, run(parser, [qf(d) for d in doms], ov, threads=a.threads)
+        if c == "keysso":
+            ov = {**ov, "userlogin": ap.ENV["APARSER_KEYSSO_USERLOGIN"]}
+        return c, run(parser, [qf(d) for d in doms], ov, threads=threads, retry=retry,
+                      cache=cache_dir / f"{c}.jsonl" if cache_dir else None, fields=FIELDS.get(c))
 
     with ThreadPoolExecutor(min(6, max(1, len(parsers)))) as ex:
         results = list(ex.map(one_check, parsers))
@@ -202,8 +265,15 @@ def cmd_domains(a):
     if "hosting" in checks:
         first_ip = {d: next(iter((x.get("ip") for x in (r.get("ips") or []) if x.get("ip"))), None)
                     for d, r in zip(doms, dict(results)["dns"])}
-        for d, v in hosting(first_ip, a.threads).items():
+        for d, v in hosting(first_ip, threads).items():
             table[d].update(v)
+    return table, raw
+
+
+def cmd_domains(a):
+    doms = [domain_of(d) for d in read_items(a)]
+    GEO["cc"] = a.geo.lower()
+    table, raw = collect(doms, parse_checks(a.checks), a.threads)
     save("domains", a.label or f"{len(doms)}_{a.checks.replace(',', '-')}"[:40], {"домены": list(table.values())}, raw)
 
 
@@ -378,6 +448,7 @@ def register(sub):
     p.add_argument("--checks", default="default",
                    help=f"проверки через запятую: {', '.join(list(CHECKS) + list(SPECIAL))}; safe = обе SafeBrowsing; "
                         f"наборы: default ({','.join(PRESETS['default'])}), pbn, all")
+    p.add_argument("--geo", default="ru", help="traffic: страна, долю трафика которой показать (ru, by, kz, us …)")
     p.set_defaults(func=cmd_domains)
 
     p = sub.add_parser("ahrefs", help="бесплатный чекер Ahrefs: DR, ASpamRank, беклинки, 20 доноров с анкорами")

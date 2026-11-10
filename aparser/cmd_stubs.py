@@ -100,7 +100,7 @@ STUBS = {
     # --- ключевые слова и домены с аккаунтами ---
     "keysso": {"parser": "Rank::KeysSo", "input": "домен", "opts": {"se_db": "msk"},
                "needs": [("userlogin", "APARSER_KEYSSO_USERLOGIN", "значение куки userlogin из браузера после входа в keys.so (токен API не подходит)", True)],
-               "status": "🔑 не проверяли — нужна кука", "hint": "база --set se_db=msk|spb|…; у Keys.so есть и официальный API по токену"},
+               "status": "✅ работает с кукой; с 1.2.3712 (18.10.2026) заполнены backlinks_count/outlinks_count и новые backlinks_domains_count, outlinks_domains_count, backlinks_ip_count, backlinks_anchor_count", "hint": "база --set se_db=msk|spb|…; у Keys.so есть и официальный API по токену"},
     "kp-ideas": {"parser": "SE::Google::KeywordPlanner::Ideas", "input": "фраза", "opts": {},
                  "needs": [("email", "APARSER_GOOGLE_ADS_EMAIL", "логин Google Ads", False), ("password", "APARSER_GOOGLE_ADS_PASSWORD", "пароль Google Ads", False),
                            ("allCookies", "APARSER_GOOGLE_ADS_COOKIES", "или куки кабинета Google Ads целиком", False)],

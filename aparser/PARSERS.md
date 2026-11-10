@@ -10,8 +10,14 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 > Заработали заготовки Startpage (выдача, картинки, видео), Baidu, Dogpile-картинки, eBay,
 > поиск и подсказки Wildberries, отзывы Google; перестала — видео Bing. Таблица ниже обновлена
 > только по AOL и AliExpress, живое состояние каждого метода — в панели задач.
+>
+> **Перепроверка 09.11.2026 на A-Parser 1.2.3742 Beta** (13 методов, резидентские прокси):
+> AOL так же не работает (Yahoo работает), AliExpress — 1 из 1. Заготовки Baidu, Dogpile-картинки,
+> eBay, поиск и подсказки Wildberries вернули данные и перенесены в «частично» (поля не сверяли);
+> видео Bing и отзывы Google тоже с данными. Startpage (выдача, картинки, видео) не работает:
+> «Content mismatch» на любом IP.
 
-Итог: ✅ работает — 84, ⚠️ частично — 5, ❌ не заработал — 24, 🔑 нужен аккаунт/ключ — 11, ⛔ не запускаем — 6, ⚙️ служебный — 7.
+Итог: ✅ работает — 84, ⚠️ частично — 10, ❌ не заработал — 19, 🔑 нужен аккаунт/ключ — 11, ⛔ не запускаем — 6, ⚙️ служебный — 7.
 
 Та же таблица в терминале: `python run.py parsers` (или `--status ok|part|bad|key|skip|util`).
 
@@ -104,17 +110,22 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `Util::ReCaptcha2` | `(внутри Google)` | пресет capmonster |
 | `Util::Turnstile` | `(внутри Ahrefs, Majestic, Bing)` | пресет capmonster |
 
-## ⚠️ частично — 5
+## ⚠️ частично — 10
 
 | Парсер | Команда скилла | Заметка |
 |---|---|---|
-| `Maps::Google::Reviews` | `stub google-reviews` | рейтинг и число отзывов есть, самих отзывов — первые 5 |
+| `Maps::Google::Reviews` | `stub google-reviews` | рейтинг и число отзывов есть, самих отзывов — первые 5; 09.11.2026 на 1.2.3742 — данные есть |
+| `SE::Baidu` | `stub baidu` | 09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли |
 | `SE::Bing::Images` | `stub bing-images` | 1 результат |
-| `SE::Bing::Video` | `stub bing-video` | 0 результатов |
+| `SE::Bing::Video` | `stub bing-video` | 27.09 — 0 результатов; 09.11.2026 на 1.2.3742 — данные есть (1 запрос) |
+| `SE::Dogpile::Images` | `stub dogpile-images` | 09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли |
 | `SE::Google::TrustCheck` | `stub trustcheck` | траст 0 даже у Википедии — не верить |
-| `Shop::AliExpress` | `shop --store aliexpress` | 28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает |
+| `Shop::AliExpress` | `shop --store aliexpress` | 28.10.2026 на 1.2.3712: через раз — ошибка JS парсера (tagText) на части страниц, повтор помогает; 09.11.2026 на 1.2.3742 — 1 из 1 |
+| `Shop::Wildberries::ProductsList` | `stub wb-search` | 09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос, прокси не российские), поля не сверяли |
+| `Shop::Wildberries::Suggest` | `stub wb-suggest` | 09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли |
+| `Shop::eBay` | `stub ebay` | 09.11.2026 на 1.2.3742 заготовка вернула данные (1 запрос), поля не сверяли |
 
-## ❌ не заработал — 24
+## ❌ не заработал — 19
 
 | Парсер | Команда скилла | Заметка |
 |---|---|---|
@@ -122,26 +133,21 @@ CapMonster, настройки по умолчанию. ❌ значит «не 
 | `FreeAI::Copilot` | `stub copilot` |  |
 | `FreeAI::Perplexity` | `stub perplexity` | без куки аккаунта |
 | `Reddit::Comments` | `stub reddit-comments` |  |
-| `SE::AOL` | `serp --engine aol` | 28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через `--engine yahoo` |
+| `SE::AOL` | `serp --engine aol` | 28.10.2026 на 1.2.3712: A-Parser берёт AOL с поиска Yahoo и получает пустую страницу — та же выдача через `--engine yahoo`; 09.11.2026 на 1.2.3742 — то же |
 | `SE::AOL::Suggest` | `stub aol-suggest` |  |
-| `SE::Baidu` | `stub baidu` |  |
 | `SE::Bing` | `stub bing` | пусто за 7 мин; выдача Bing — через SE::Bing::Position (serp --engine bing) |
 | `SE::Brave` | `stub brave` |  |
 | `SE::Dogpile` | `stub dogpile` |  |
-| `SE::Dogpile::Images` | `stub dogpile-images` |  |
 | `SE::Google::ByImage` | `stub google-byimage` |  |
 | `SE::Google::Images` | `stub google-images` |  |
-| `SE::Startpage` | `stub startpage` |  |
-| `SE::Startpage::Images` | `stub startpage-images` |  |
-| `SE::Startpage::Videos` | `stub startpage-videos` |  |
+| `SE::Startpage` | `stub startpage` | у автора 28.10.2026 на 1.2.3712 заработала; 09.11.2026 на 1.2.3742 — «Content mismatch» на 10 разных резидентских IP (ответ 200, 21 КБ) |
+| `SE::Startpage::Images` | `stub startpage-images` | как SE::Startpage: 09.11.2026 на 1.2.3742 пусто |
+| `SE::Startpage::Videos` | `stub startpage-videos` | как SE::Startpage: 09.11.2026 на 1.2.3742 пусто |
 | `SE::Yandex::Balaboba` | — | сервис закрыт Яндексом |
 | `SE::Yandex::Position` | `stub yandex-position` | http — пусто, browser — завис на 38 мин; позиции — positions --engine yandex |
 | `SE::Yandex::Translate` | `stub yandex-translate` | 13 мин без ответа |
 | `SecurityTrails::IP` | `stub trails-ip` |  |
 | `Shop::Wildberries::ProductInfo` | `stub wb-product` | не проверен: ссылку брали из ProductsList |
-| `Shop::Wildberries::ProductsList` | `stub wb-search` | возможно, нужны российские прокси |
-| `Shop::Wildberries::Suggest` | `stub wb-suggest` |  |
-| `Shop::eBay` | `stub ebay` |  |
 
 ## 🔑 нужен аккаунт/ключ — 11
 

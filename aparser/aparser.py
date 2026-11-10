@@ -13,6 +13,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sys
@@ -55,10 +56,17 @@ DATA = Path(ENV.get("APARSER_DATA") or SKILL_DIR / "data")
 CAPTCHA = ENV.get("APARSER_CAPTCHA_PRESET") or "capmonster"
 # Проксичекер, по которому status показывает живые прокси
 PROXY_CHECKER = ENV.get("APARSER_PROXY_CHECKER", "")
+# Имя проксичекера с прокси одной страны для serp и positions, {country} — код страны (ru, us …).
+# Пусто — запросы идут через прокси всех чекеров
+COUNTRY_CHECKER = ENV.get("APARSER_COUNTRY_CHECKER", "")
 
 
 class APError(RuntimeError):
     pass
+
+
+class APUnavailable(APError):
+    """A-Parser недоступен: нет связи или он перезапускается (aparser-core unreachable) — можно повторить."""
 
 
 def call(action: str, data: dict | None = None, timeout: int = 600) -> object:
@@ -68,7 +76,7 @@ def call(action: str, data: dict | None = None, timeout: int = 600) -> object:
     try:
         r = requests.post(API_URL, json=body, timeout=timeout)
     except requests.RequestException as e:
-        raise APError(f"A-Parser не отвечает на {API_URL} — запущен ли он? (python server.py start)") from e
+        raise APUnavailable(f"A-Parser не отвечает на {API_URL} — запущен ли он? (python server.py start)") from e
     try:
         j = r.json()
     except ValueError as e:
@@ -78,6 +86,8 @@ def call(action: str, data: dict | None = None, timeout: int = 600) -> object:
         if j.get("msg") == "Auth failed":
             raise APError("A-Parser не принял пароль — проверьте APARSER_API_PASSWORD "
                           "(это пароль интерфейса A-Parser)")
+        if "unreachable" in str(j.get("error", "")):       # ядро A-Parser упало и перезапускается
+            raise APUnavailable(f"{action}: {j}")
         raise APError(f"{action}: {j}")
     return j.get("data")
 
@@ -117,8 +127,9 @@ def validate(parser: str, overrides: dict | None, preset: str = "default") -> No
 
 
 def captcha(parser: str) -> dict:
-    """Пресеты капчи для тех связанных Util-парсеров, которые есть у парсера."""
-    return {k: CAPTCHA for k in options(parser)
+    """Пресеты капчи для тех связанных Util-парсеров, которые есть у парсера.
+    Своё имя пресета для парсера — APARSER_CAPTCHA_PRESET_ANTIGATE / _RECAPTCHA2 / _TURNSTILE."""
+    return {k: ENV.get("APARSER_CAPTCHA_PRESET_" + k.split("_")[1].upper()) or CAPTCHA for k in options(parser)
             if k in ("Util_AntiGate_preset", "Util_ReCaptcha2_preset", "Util_Turnstile_preset")}
 
 
@@ -210,31 +221,88 @@ def mask(text: str) -> str:
     return text
 
 
+def _fields_format(fields) -> str:
+    """formatresult: одна строка JSON на запрос — только нужные поля (значения A-Parser подставляет строками)."""
+    return '{"__q":"$query",' + ",".join(f'"{f}":"${f}"' for f in fields) + "}\n"
+
+
+def _fields_results(text: str, part: list[str]) -> list[dict]:
+    """Строки JSON из resultString → ответы в виде rawResults; запрос без строки в ответе — неудача."""
+    got = {}
+    for line in text.splitlines():
+        try:
+            o = json.loads(line)
+            got[o.pop("__q")] = o
+        except (ValueError, KeyError, AttributeError):
+            continue
+    return [{"query": {"orig": q}, "info": {"success": 1}, **got[q]} if q in got else
+            {"query": {"orig": q}, "info": {"success": 0}} for q in part]
+
+
 def bulk(parser: str, queries: list[str], overrides: dict | None = None, threads: int = 5,
          preset: str = "default", batch: int | None = None, progress=print, keep: tuple = (),
-         on_batch=None) -> list[dict]:
+         on_batch=None, cache: Path | None = None, fields: tuple | None = None) -> list[dict]:
     """Пачка запросов через bulkRequest (ответ сразу). Списки режем на порции: по умолчанию так, чтобы
-    порций было не меньше пяти (прогресс для панели задач), но не больше 50 запросов в порции.
-    on_batch(сделано, успешно) — после каждой порции."""
+    порций было не меньше пяти (прогресс для панели задач), но не больше 50 запросов в порции — и не меньше
+    числа потоков, иначе лишние потоки простаивают (Google идёт в 100 потоков).
+    on_batch(сделано, успешно) — после каждой порции.
+    cache — файл .jsonl: успешные ответы дописываются после каждой порции, при повторном запуске уже полученные
+    запросы берутся из него (упал A-Parser или пропала связь на середине — готовые порции не пропадают).
+    fields — запросить только эти поля (без rawResults): парсер не разбирает остальные. Нужно, когда разбор
+    ненужного поля роняет весь ответ — Rank::MOZ падает на discoveredAndLostLinkingDomains."""
     validate(parser, overrides, preset)
+    done: dict = {}
+    if cache and cache.exists():
+        for line in cache.read_text(encoding="utf-8").splitlines():
+            try:
+                q, res = json.loads(line)
+                done[q] = res
+            except ValueError:
+                continue                      # строка, оборванная падением, — пропускаем
+    todo = [q for q in queries if q not in done]
+    if done and progress:
+        progress(f"  {parser}: из кэша {len(queries) - len(todo)} из {len(queries)}")
     if batch is None:
-        batch = min(50, max(threads, -(-len(queries) // 5)))
-    out = []
-    for i in range(0, len(queries), batch):
-        part = queries[i:i + batch]
+        batch = max(threads, min(50, -(-len(todo) // 5)))
+    out = [_reshape(parser, done[q], keep) for q in queries if q in done]
+    for i in range(0, len(todo), batch):
+        part = todo[i:i + batch]
         t = time.time()
-        d = call("bulkRequest", {"parser": parser, "preset": preset, "configPreset": "default",
-                                 "threads": threads, "rawResults": 1, "doLog": 0,
-                                 "queries": part, "options": _overrides(overrides)}, timeout=3600)
-        rows = [_reshape(parser, r, keep) for r in d.get("results", [])]
+        # порцию повторяем при обрыве связи или перезапуске A-Parser (он поднимается сам за ~10 с): иначе
+        # одна сетевая заминка обрывает весь прогон и уже полученные порции пропадают
+        req = {"parser": parser, "preset": preset, "configPreset": "default", "threads": threads, "rawResults": 1,
+               "doLog": 0, "queries": part, "options": _overrides(overrides)}
+        if fields:                            # только эти поля: строка JSON на запрос через formatresult
+            req["rawResults"] = 0
+            req["options"] = _overrides({**(overrides or {}), "formatresult": _fields_format(fields)})
+        for attempt in range(3):
+            try:
+                d = call("bulkRequest", req, timeout=3600)
+                break
+            except APUnavailable as e:
+                if attempt == 2:
+                    raise
+                if progress:
+                    progress(f"  {parser}: {e} — повтор порции через 30 с ({attempt + 1}/2)")
+                time.sleep(30)
+        results = _fields_results(d.get("resultString") or "", part) if fields else d.get("results", [])
+        for q, r in zip(part, results):
+            done[q] = r
+        if cache:                             # только успешные: неудачные при перезапуске спросим снова
+            cache.parent.mkdir(parents=True, exist_ok=True)
+            with cache.open("a", encoding="utf-8") as f:
+                for q, r in zip(part, results):
+                    if (r.get("info") or {}).get("success") == 1:
+                        f.write(json.dumps([q, r], ensure_ascii=False) + "\n")
+        rows = [_reshape(parser, r, keep) for r in results]
         out += rows
         ok = sum(1 for r in rows if r.get("success") == 1)
         if progress:
-            progress(f"  {parser}: {min(i + batch, len(queries))}/{len(queries)} "
+            progress(f"  {parser}: {len(queries) - len(todo) + min(i + batch, len(todo))}/{len(queries)} "
                      f"(успешно {ok}/{len(part)}, {time.time() - t:.0f} с)")
         if on_batch:
             on_batch(len(out), sum(1 for r in out if r.get("success") == 1))
-    return out
+    return [_reshape(parser, done[q], keep) if q in done else Result({"query": q, "success": 0}) for q in queries]
 
 
 def live_proxies(checker: str | None = None) -> int:
